@@ -1290,6 +1290,38 @@ final class EventTail {
     }
 }
 
+// MARK: - ZCode 唤起（AX 直操窗口，绕过后台激活限制）
+
+enum ZCodeActivator {
+    /// 纯 AX 把 ZCode 拉到前台：设 frontmost + 取消窗口最小化 + AXRaise。
+    /// NSWorkspace.open / activate() 从后台守护进程调用会被 macOS 静默忽略
+    /// （实测最小化窗口唤不起）；AX 不受此限制，但需要辅助功能授权（首次弹一次）。
+    @discardableResult
+    static func raise(bundleId: String) -> Bool {
+        guard let app = NSWorkspace.shared.runningApplications
+            .first(where: { $0.bundleIdentifier == bundleId && $0.activationPolicy == .regular }) else { return false }
+        let appEl = AXUIElementCreateApplication(app.processIdentifier)
+        AXUIElementSetAttributeValue(appEl, "AXEnhancedUserInterface" as CFString, kCFBooleanTrue)
+        AXUIElementSetAttributeValue(appEl, kAXFrontmostAttribute as CFString, kCFBooleanTrue)
+        var wins: CFTypeRef?
+        if AXUIElementCopyAttributeValue(appEl, kAXWindowsAttribute as CFString, &wins) == .success,
+           let ws = wins as? [AXUIElement] {
+            for w in ws {
+                AXUIElementSetAttributeValue(w, "AXMinimized" as CFString, kCFBooleanFalse)
+                AXUIElementSetAttributeValue(w, "AXMain" as CFString, kCFBooleanTrue)
+                AXUIElementPerformAction(w, "AXRaise" as CFString)
+            }
+        }
+        return true
+    }
+
+    /// AX 可用性（prompt=true 时弹系统授权引导，用户允许一次后永久生效）
+    static func trusted(prompt: Bool = false) -> Bool {
+        let opts = prompt ? [kAXTrustedCheckOptionPrompt.takeUnretainedValue() as String: true] as CFDictionary : nil
+        return AXIsProcessTrustedWithOptions(opts)
+    }
+}
+
 // MARK: - App delegate
 
 final class AppDelegate: NSObject, NSApplicationDelegate {
@@ -1545,11 +1577,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         PetAlertController.shared.show(kind: kind, title: title, body: body)
     }
 
-    /// 跳回 ZCode：带工作区时 spawn --open-workspace（路由到对应工作区），并补一次
-    /// Dock 点击语义的激活——转发只保证路由，窗口在别的 Space/最小化/已关窗时不会自己
-    /// 到眼前，reopen 会切 Space、恢复最小化窗口、无窗口时让 ZCode 重建主窗口。
-    /// 不用 zcode://workspace/open 深链——主进程对深链无条件弹「是否在 ZCode 中打开此文件夹？」
-    /// 确认框（confirmExternalWorkspaceOpen，3.14.0 实测源码，无信任列表/绕过参数）。
+    /// 跳回 ZCode：带工作区时 spawn --open-workspace（单实例转发），再 AX 直操把窗口
+    /// 拉到眼前（后台进程的 NSWorkspace.open/activate 会被 macOS 静默忽略——实测
+    /// "Dock 图标一闪而过"即转发进程退出后什么都不发生）。AX 无授权时退回 open。
+    /// 不用 zcode://workspace/open 深链——主进程对深链无条件弹确认框（3.14.0 实测源码）。
     func jumpToZCode(workspacePath: String?) {
         if let ws = workspacePath, !ws.isEmpty, let exe = zcodeExecutablePath() {
             let proc = Process()
@@ -1558,16 +1589,23 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             proc.standardOutput = FileHandle.nullDevice
             proc.standardError = FileHandle.nullDevice
             if (try? proc.run()) != nil {
-                // 已运行的 ZCode 经单实例锁转发参数后，本进程随即自行退出（Dock 图标一闪即此）
-                openZCodeApp()
+                raiseZCode()
                 return
             }
         }
-        openZCodeApp()
+        raiseZCode()
     }
 
-    /// activate() 从后台进程调用时对最小化窗口无效（实测返回 true 但窗口不动）；
-    /// open app URL 等价 Dock 点击（reopen 事件），ZCode 端会恢复并聚焦主窗口
+    /// AX 唤起；未授权时弹一次引导并退回 NSWorkspace.open（等价 Dock 点击 reopen）
+    private func raiseZCode() {
+        if ZCodeActivator.trusted() {
+            ZCodeActivator.raise(bundleId: config.zcodeAppBundleId)
+        } else {
+            ZCodeActivator.trusted(prompt: true)   // 引导用户在系统设置里授权（一次性）
+            openZCodeApp()
+        }
+    }
+
     private func openZCodeApp() {
         let appURL = NSWorkspace.shared.urlForApplication(withBundleIdentifier: config.zcodeAppBundleId)
             ?? URL(fileURLWithPath: "/Applications/ZCode.app")
@@ -1892,7 +1930,31 @@ final class PanelTestDelegate: NSObject, NSApplicationDelegate {
     }
 }
 
+// MARK: - --jump-test（唤起链路自检：AX 前置 ZCode，验证授权与最小化恢复）
+
+final class JumpTestDelegate: NSObject, NSApplicationDelegate {
+    func applicationDidFinishLaunching(_ notification: Notification) {
+        let trusted = ZCodeActivator.trusted(prompt: true)
+        print("ax trusted   : \(trusted)")
+        if trusted {
+            let ok = ZCodeActivator.raise(bundleId: "dev.zcode.app")
+            print("ax raise     : \(ok)")
+        } else {
+            print("ax raise     : skipped（请在系统设置→隐私与安全性→辅助功能里允许 zcode-pet 后重试）")
+        }
+        Timer.scheduledTimer(withTimeInterval: 2, repeats: false) { _ in NSApp.terminate(nil) }
+    }
+}
+
 // MARK: - main
+
+if CommandLine.arguments.contains("--jump-test") {
+    let app = NSApplication.shared
+    let delegate = JumpTestDelegate()
+    app.delegate = delegate
+    app.setActivationPolicy(.accessory)
+    app.run()
+}
 
 if CommandLine.arguments.contains("--test") {
     exit(runSelfTest())
