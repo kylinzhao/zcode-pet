@@ -528,10 +528,12 @@ final class PetPanelController {
     private var baseOrigin: NSPoint = .zero
     private var phase: Double = 0
     private var dragging = false
+    private var onDragEndHandler: ((NSPoint) -> Void)?
 
     static let size = NSSize(width: 148, height: 158)
 
     init(savedOrigin: NSPoint?, onClick: @escaping () -> Void, onDragEnd: @escaping (NSPoint) -> Void) {
+        onDragEndHandler = onDragEnd
         let p = NSPanel(contentRect: NSRect(origin: .zero, size: PetPanelController.size),
                         styleMask: [.borderless, .nonactivatingPanel], backing: .buffered, defer: false)
         p.level = .floating
@@ -581,6 +583,25 @@ final class PetPanelController {
         p.setFrameOrigin(baseOrigin)
         p.orderFrontRegardless()
         panel = p
+
+        // 拔/接显示器、分辨率变化后把宠物拉回可见区（否则它停在已消失的屏幕坐标上，
+        // 窗口还在但永远看不见——v0.5.1 实测：外接屏拔掉后宠物"失踪"）
+        NotificationCenter.default.addObserver(
+            forName: NSApplication.didChangeScreenParametersNotification, object: nil, queue: .main
+        ) { [weak self] _ in
+            self?.ensureOnScreen(persist: true)
+        }
+    }
+
+    /// 把窗口夹回 NSScreen.main 可见区，需要时回写持久化位置
+    func ensureOnScreen(persist: Bool) {
+        guard let vf = NSScreen.main?.visibleFrame else { return }
+        let x = min(max(panel.frame.origin.x, vf.minX), vf.maxX - PetPanelController.size.width)
+        let y = min(max(panel.frame.origin.y, vf.minY), vf.maxY - PetPanelController.size.height)
+        guard NSPoint(x: x, y: y) != panel.frame.origin else { return }
+        baseOrigin = NSPoint(x: x, y: y)
+        panel.setFrameOrigin(baseOrigin)
+        if persist { onDragEndHandler?(baseOrigin) }
     }
 
     func update(mode: PetMode, emoji: String, runningCount: Int, unreadCount: Int) {
