@@ -802,6 +802,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let muteItem = menu.addItem(withTitle: muteTitle, action: #selector(toggleMute), keyEquivalent: "m")
         muteItem.target = self
 
+        menu.addItem(withTitle: "发条测试通知", action: #selector(testNotify), keyEquivalent: "").target = self
+
         // 宠物造型子菜单
         let skinMenu = NSMenu(title: "宠物造型")
         for s in petSkins {
@@ -843,6 +845,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     @objc private func openUnreadTask(_ sender: NSMenuItem) {
         jumpToZCode(workspacePath: sender.representedObject as? String)
+    }
+
+    /// 验证图标/声音/点击跳转链路是否正常
+    @objc private func testNotify() {
+        postNotification(taskId: "test", title: "🐾 任务完成", body: "测试通知：检查图标与点击跳转",
+                         sound: "Glass", workspacePath: "")
     }
 
     @objc private func toggleMute() {
@@ -930,10 +938,32 @@ func runSelfTest() -> Int32 {
     return 0
 }
 
+// MARK: - --notify-test（发一条测试通知后退出：验证横幅图标/声音/点击跳转）
+
+final class NotifyTestDelegate: NSObject, NSApplicationDelegate {
+    func applicationDidFinishLaunching(_ notification: Notification) {
+        let content = UNMutableNotificationContent()
+        content.title = "🐾 任务完成"
+        content.body = "测试通知：检查横幅图标与点击跳转"
+        content.sound = UNNotificationSound(named: UNNotificationSoundName("Glass"))
+        UNUserNotificationCenter.current().add(
+            UNNotificationRequest(identifier: "pet-notify-test", content: content, trigger: nil))
+        Timer.scheduledTimer(withTimeInterval: 3, repeats: false) { _ in NSApp.terminate(nil) }
+    }
+}
+
 // MARK: - main
 
 if CommandLine.arguments.contains("--test") {
     exit(runSelfTest())
+}
+
+if CommandLine.arguments.contains("--notify-test") {
+    let app = NSApplication.shared
+    let delegate = NotifyTestDelegate()   // NSApplication.delegate 是 weak，需强引用
+    app.delegate = delegate
+    app.setActivationPolicy(.accessory)
+    app.run()
 }
 
 let app = NSApplication.shared

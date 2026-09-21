@@ -24,12 +24,18 @@ cat > "$APP_BUNDLE/Contents/Info.plist" <<'EOF'
   <key>CFBundleName</key><string>zcode-pet</string>
   <key>CFBundleDisplayName</key><string>zcode-pet</string>
   <key>CFBundlePackageType</key><string>APPL</string>
-  <key>CFBundleShortVersionString</key><string>0.4.0</string>
+  <key>CFBundleShortVersionString</key><string>0.4.1</string>
+  <key>CFBundleIconFile</key><string>AppIcon</string>
   <key>LSUIElement</key><true/>
   <key>NSHighResolutionCapable</key><true/>
 </dict>
 </plist>
 EOF
+
+# 通知横幅/通知中心里的图标取自 bundle 图标，签名前补进去
+mkdir -p "$APP_BUNDLE/Contents/Resources"
+bash "$ROOT/scripts/make_icon.sh" "$APP_BUNDLE/Contents/Resources/AppIcon.icns" \
+  || echo "  (图标生成失败，通知将无图标)"
 
 codesign --force -s - "$APP_BUNDLE" >/dev/null 2>&1 || echo "  (ad-hoc 签名跳过，通知可能不可用)"
 
