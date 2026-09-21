@@ -23,6 +23,8 @@
 // v0.7 手绘皮肤：PetSkin 支持可选 art 闭包，画布为 26×17 像素字符矩阵（'.' 透明 + 调色板），
 //     面板走 NSImageView、通知图标走同一套渲染；新增樱木花道/白兵，恐龙(trex)由 emoji
 //     重绘为像素画。--render-art <dir> 可导出全部手绘皮肤的 PNG 自检（含行宽校验）。
+// v0.7.2 图片资产通道：樱木/恐龙/白兵改为 mmx image-01 生成贴纸（daemon/assets/pet/，
+//     install.sh 拷入 Resources/pet-art/），面板与图标优先用资产，缺失自动降级像素画。
 //
 // 构建：bash scripts/install.sh（编译进 .app bundle + ad-hoc 签名）；自检：--test。
 
@@ -226,11 +228,12 @@ struct PetSkin {
     let name: String
     let glyph: String                      // 菜单里的代表 emoji（手绘皮肤也用 emoji 当小图标）
     let idle: String, working: String, celebrate: String, error: String
-    let art: ((PetMode, NSRect) -> Void)?  // 非 nil = 手绘皮肤：面板/通知图标走代码作画，emoji 仅兜底
+    let art: ((PetMode, NSRect) -> Void)?  // 非 nil = 像素画皮肤（作资产兜底）
+    let asset: Bool                        // true = bundle 里有 pet-art/<id>-<mode>.png 图片资产（mmx 生成）
 
     init(id: String, name: String, glyph: String? = nil,
          idle: String, working: String, celebrate: String, error: String,
-         art: ((PetMode, NSRect) -> Void)? = nil) {
+         art: ((PetMode, NSRect) -> Void)? = nil, asset: Bool = false) {
         self.id = id
         self.name = name
         self.glyph = glyph ?? idle
@@ -239,6 +242,7 @@ struct PetSkin {
         self.celebrate = celebrate
         self.error = error
         self.art = art
+        self.asset = asset
     }
 
     func emoji(for mode: PetMode) -> String {
@@ -254,7 +258,7 @@ struct PetSkin {
 let petSkins: [PetSkin] = [
     .init(id: "cat", name: "橘猫", idle: "😺", working: "😸", celebrate: "🎉", error: "😿"),
     .init(id: "sakuragi", name: "樱木花道", idle: "🏀", working: "🏀", celebrate: "🎉", error: "😵",
-          art: { PetArt.pixel(PetArt.sakuragiSheet, $0, in: $1) }),
+          art: { PetArt.pixel(PetArt.sakuragiSheet, $0, in: $1) }, asset: true),
     .init(id: "blackcat", name: "黑猫", idle: "🐈‍⬛", working: "🐈‍⬛", celebrate: "🎉", error: "😿"),
     .init(id: "dog", name: "小狗", idle: "🐶", working: "🐕", celebrate: "🎉", error: "🥺"),
     .init(id: "panda", name: "熊猫", idle: "🐼", working: "🐼", celebrate: "🎉", error: "😖"),
@@ -263,9 +267,9 @@ let petSkins: [PetSkin] = [
     .init(id: "chick", name: "小黄鸭", idle: "🐤", working: "🐥", celebrate: "🎉", error: "😵‍💫"),
     .init(id: "frog", name: "青蛙", idle: "🐸", working: "🐸", celebrate: "🎉", error: "😵"),
     .init(id: "trex", name: "恐龙", idle: "🦖", working: "🦕", celebrate: "🎉", error: "😵",
-          art: { PetArt.pixel(PetArt.dinoSheet, $0, in: $1) }),
+          art: { PetArt.pixel(PetArt.dinoSheet, $0, in: $1) }, asset: true),
     .init(id: "trooper", name: "白兵", idle: "🪖", working: "🪖", celebrate: "🎉", error: "😵",
-          art: { PetArt.pixel(PetArt.trooperSheet, $0, in: $1) }),
+          art: { PetArt.pixel(PetArt.trooperSheet, $0, in: $1) }, asset: true),
     .init(id: "unicorn", name: "独角兽", idle: "🦄", working: "🦄", celebrate: "🎉", error: "😵"),
     .init(id: "robot", name: "机器人", idle: "🤖", working: "🤖", celebrate: "🎉", error: "👾"),
     .init(id: "ghost", name: "幽灵", idle: "👻", working: "👻", celebrate: "🎉", error: "💀"),
@@ -388,6 +392,20 @@ enum PetArt {
                                           width: cell + 0.5, height: cell + 0.5)).fill()
             }
         }
+    }
+
+    // MARK: 图片资产皮肤（mmx 生成，bundle Resources/pet-art/，缺失时自动降级像素画/emoji）
+
+    private static var assetCache: [String: NSImage?] = [:]
+
+    static func assetImage(id: String, mode: PetMode) -> NSImage? {
+        let key = "\(id)-\(modeName(mode))"
+        if let cached = assetCache[key] { return cached }
+        let img = Bundle.main.resourceURL
+            .map { $0.appendingPathComponent("pet-art/\(key).png") }
+            .flatMap { NSImage(contentsOf: $0) }
+        assetCache[key] = .some(img)
+        return img
     }
 
     // MARK: 恐龙（绿皮肤 + 背角刺 + 浅色口鼻）
@@ -677,18 +695,30 @@ enum AppIconManager {
         generateTo(dest) { size in drawEmoji(emoji, size: size) }
     }
 
-    /// 皮肤 → icns：手绘皮肤画 art，emoji 皮肤画 emoji
+    /// 皮肤 → icns：图片资产 > 像素画 > emoji
     static func generate(skin: PetSkin, to dest: URL) -> Bool {
-        guard skin.art != nil else { return generate(emoji: skin.idle, to: dest) }
-        return generateTo(dest) { size in drawArt(skin, size: size) }
+        generateTo(dest) { size in
+            if skin.asset, let img = PetArt.assetImage(id: skin.id, mode: .idle) {
+                drawAsset(img, size: size)
+            } else if skin.art != nil {
+                drawArt(skin, size: size)
+            } else {
+                drawEmoji(skin.idle, size: size)
+            }
+        }
     }
 
     /// 图标 PNG 预览（--render-art 自检用）
     static func renderIconPNG(skin: PetSkin, pixels: Int, to url: URL) -> Bool {
-        guard skin.art != nil else {
-            return writePNG(content: { drawEmoji(skin.idle, size: $0) }, pixels: pixels, to: url)
-        }
-        return writePNG(content: { drawArt(skin, size: $0) }, pixels: pixels, to: url)
+        writePNG(content: { size in
+            if skin.asset, let img = PetArt.assetImage(id: skin.id, mode: .idle) {
+                drawAsset(img, size: size)
+            } else if skin.art != nil {
+                drawArt(skin, size: size)
+            } else {
+                drawEmoji(skin.idle, size: size)
+            }
+        }, pixels: pixels, to: url)
     }
 
     private static func generateTo(_ dest: URL, content: (CGFloat) -> Void) -> Bool {
@@ -737,6 +767,14 @@ enum AppIconManager {
     private static func drawArt(_ skin: PetSkin, size: CGFloat) {
         PetArt.render(art: skin.art!, mode: .idle,
                       in: NSRect(x: size * 0.07, y: size * 0.10, width: size * 0.86, height: size * 0.80))
+    }
+
+    /// 图片资产等比放进图标内框（assets 是透明底方图，直接适配）
+    private static func drawAsset(_ img: NSImage, size: CGFloat) {
+        let rect = NSRect(x: size * 0.04, y: size * 0.04, width: size * 0.92, height: size * 0.92)
+        let scale = min(rect.width / img.size.width, rect.height / img.size.height)
+        let w = img.size.width * scale, h = img.size.height * scale
+        img.draw(in: NSRect(x: rect.midX - w / 2, y: rect.midY - h / 2, width: w, height: h))
     }
 
     @discardableResult
@@ -1074,7 +1112,7 @@ final class PetPanelController {
         emojiField.frame = NSRect(x: 3, y: 44, width: 98, height: 58)
 
         artView = NSImageView(frame: NSRect(x: 0, y: 40, width: 104, height: 68))
-        artView.imageScaling = .scaleNone
+        artView.imageScaling = .scaleProportionallyUpOrDown   // 资产图 512²，等比缩到面板框
         artView.isHidden = true
 
         captionField = NSTextField(labelWithString: "启动中…")
@@ -1122,8 +1160,13 @@ final class PetPanelController {
     }
 
     func update(mode: PetMode, skin: PetSkin, runningCount: Int, unreadCount: Int) {
-        if skin.art != nil {
-            // 手绘皮肤：按 skin+mode 渲染一次并缓存
+        if skin.asset, let img = PetArt.assetImage(id: skin.id, mode: mode) {
+            // 图片资产皮肤（mmx 生成）
+            emojiField.isHidden = true
+            artView.isHidden = false
+            artView.image = img
+        } else if let art = skin.art {
+            // 像素画皮肤：按 skin+mode 渲染一次并缓存
             emojiField.isHidden = true
             artView.isHidden = false
             let key = "\(skin.id)-\(mode)"

@@ -9,7 +9,7 @@
 😿 任务出错了 ⚠️            ← 有任务失败（颤抖动画 + 必须点掉的弹窗）
 ```
 
-菜单栏 `🐾 N 📬M`：N = 执行中任务数，M = 未读完成数。下拉可看清单（**点击直达对应工作区**）、切换 17 款皮肤——14 款 emoji（猫/狗/熊猫/企鹅/火箭/机器人/幽灵…）+ 3 款像素画手绘（**樱木花道、恐龙、白兵**，待机/执行/庆祝/出错四种状态各画各的姿势表情）、静音。
+菜单栏 `🐾 N 📬M`：N = 执行中任务数，M = 未读完成数。下拉可看清单（**点击直达对应工作区**）、切换 17 款皮肤——14 款 emoji（猫/狗/熊猫/企鹅/火箭/机器人/幽灵…）+ 3 款手绘（**樱木花道、恐龙、白兵**：MiniMax image-01 生成的贴纸风立绘，四种状态各一个姿势，像素画作离线兜底）、静音。
 
 ## 功能
 
@@ -114,9 +114,10 @@ bash scripts/install.sh    # 改 daemon/main.swift 后重跑即重新编译部�
 
 - 守护进程：`daemon/main.swift`（Swift/AppKit 单文件，皮肤表 `petSkins`、轮询状态机、UN 通知）
 - 插件：`plugins/zcode-pet/`（SessionStart 拉起守护进程、UserPromptSubmit/Stop 转发回合事件）
-- **手绘皮肤**：`PetSkin.art` 闭包非 nil 即手绘——26×17 像素字符矩阵（'.' 透明 + 调色板，
-  每种状态一帧），面板走 `NSImageView`、通知图标走同一套渲染；改完可
+- **手绘皮肤**：优先级 = 图片资产 > 像素画 > emoji。图片资产在 `daemon/assets/pet/<skin>-<mode>.png`
+  （512² 透明底贴纸，mmx image-01 生成：品红底出图 → 泛洪抠底 → 裁切），install.sh 拷入 bundle
+  `Resources/pet-art/`；像素画为 26×17 字符矩阵（`PetArt`），改完可
   `~/.zcode-pet/zcode-pet.app/Contents/MacOS/zcode-pet-daemon --render-art /tmp/pet-art`
-  导出 PNG 自检（带行宽校验，手写矩阵最容易错这个）
+  导出 PNG 自检（含行宽校验）
 
 MIT License

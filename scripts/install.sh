@@ -33,12 +33,18 @@ cat > "$APP_BUNDLE/Contents/Info.plist" <<'EOF'
 EOF
 
 # 通知横幅/通知中心里的图标取自 bundle 图标，签名前补进去。
-# 默认 🐾；守护进程启动后若选了皮肤会自动换成对应 emoji 图标（AppIcon.skin 是对账标记）。
+# 默认 🐾；守护进程启动后若选了皮肤会自动换成对应图标（AppIcon.skin 是对账标记）。
 mkdir -p "$APP_BUNDLE/Contents/Resources"
 if "$EXE" --gen-icon 🐾 "$APP_BUNDLE/Contents/Resources/AppIcon.icns"; then
   printf 'paw' > "$APP_BUNDLE/Contents/Resources/AppIcon.skin"
 else
   echo "  (图标生成失败，通知将无图标)"
+fi
+
+# 图片皮肤资产（mmx 生成，daemon/assets/pet/*.png）；缺失时守护进程自动降级像素画/emoji
+mkdir -p "$APP_BUNDLE/Contents/Resources/pet-art"
+if ls "$ROOT"/daemon/assets/pet/*.png >/dev/null 2>&1; then
+  cp "$ROOT"/daemon/assets/pet/*.png "$APP_BUNDLE/Contents/Resources/pet-art/"
 fi
 
 codesign --force -s - "$APP_BUNDLE" >/dev/null 2>&1 || echo "  (ad-hoc 签名跳过，通知可能不可用)"
