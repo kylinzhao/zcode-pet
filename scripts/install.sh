@@ -67,17 +67,22 @@ cat > "$PLIST" <<EOF
 </plist>
 EOF
 
-echo "[4/6] 加载并启动..."
+echo "[4/6] 清理旧实例并重启..."
+# 先杀旧进程再 bootstrap：新旧实例并存时，旧实例的运行时重签名会竞态破坏
+# 新实例的通知授权（实测出现过 "Notifications are not allowed"）
+pkill -x zcode-pet-daemon 2>/dev/null || true
 launchctl bootout "gui/$UID/dev.zcode.pet" 2>/dev/null || true
-sleep 2
+sleep 1
 if ! launchctl bootstrap "gui/$UID" "$PLIST" 2>/dev/null; then
   sleep 2
   launchctl bootstrap "gui/$UID" "$PLIST"
 fi
 launchctl kickstart "gui/$UID/dev.zcode.pet"
 
-echo "[5/6] 清理旧实例..."
-pkill -f "zcode-pet/bin/zcode-pet-daemon" 2>/dev/null || true
+echo "[5/6] 兜底清理残留实例..."
+if [ "$(pgrep -x zcode-pet-daemon | wc -l | tr -d ' ')" -gt 1 ]; then
+  pkill -ox zcode-pet-daemon 2>/dev/null || true
+fi
 
 echo "[6/6] 完成 ✅"
 echo "  守护进程 : ${EXE}（登录自启，SessionStart hook 兜底拉起）"

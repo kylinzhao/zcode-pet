@@ -1545,12 +1545,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         PetAlertController.shared.show(kind: kind, title: title, body: body)
     }
 
-    /// 跳回 ZCode：带工作区时走 --open-workspace（会落在该工作区的新任务上，ZCode 无任务级
-        /// 外部入口——故只作为结果面板里用户主动点的按钮）；不带时纯 activate，绝不新建任务。
+    /// 跳回 ZCode：带工作区时 spawn --open-workspace（路由到对应工作区），并补一次
+    /// Dock 点击语义的激活——转发只保证路由，窗口在别的 Space/最小化/已关窗时不会自己
+    /// 到眼前，reopen 会切 Space、恢复最小化窗口、无窗口时让 ZCode 重建主窗口。
     /// 不用 zcode://workspace/open 深链——主进程对深链无条件弹「是否在 ZCode 中打开此文件夹？」
-    /// 确认框（confirmExternalWorkspaceOpen，无信任列表/绕过参数，3.14.0 实测源码）；
-    /// 而 --open-workspace 两条路径都不弹窗：冷启动作为启动参数（open-workspace-arg 源免确认），
-    /// 热转发经 single-instance additionalData → handleOpenWorkspacePath → renderer 直接打开。
+    /// 确认框（confirmExternalWorkspaceOpen，3.14.0 实测源码，无信任列表/绕过参数）。
     func jumpToZCode(workspacePath: String?) {
         if let ws = workspacePath, !ws.isEmpty, let exe = zcodeExecutablePath() {
             let proc = Process()
@@ -1559,11 +1558,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             proc.standardOutput = FileHandle.nullDevice
             proc.standardError = FileHandle.nullDevice
             if (try? proc.run()) != nil {
-                return   // 已运行的 ZCode 会通过单实例锁把参数转给主进程，本进程随即自行退出
+                // 已运行的 ZCode 经单实例锁转发参数后，本进程随即自行退出（Dock 图标一闪即此）
+                openZCodeApp()
+                return
             }
         }
-        // activate() 从后台进程调用时对最小化窗口无效（实测返回 true 但窗口不动）；
-        // open app URL 等价 Dock 点击（reopen 事件），ZCode 端会恢复并聚焦主窗口
+        openZCodeApp()
+    }
+
+    /// activate() 从后台进程调用时对最小化窗口无效（实测返回 true 但窗口不动）；
+    /// open app URL 等价 Dock 点击（reopen 事件），ZCode 端会恢复并聚焦主窗口
+    private func openZCodeApp() {
         let appURL = NSWorkspace.shared.urlForApplication(withBundleIdentifier: config.zcodeAppBundleId)
             ?? URL(fileURLWithPath: "/Applications/ZCode.app")
         NSWorkspace.shared.open(appURL)
@@ -1622,7 +1627,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         if running.isEmpty {
             menu.addItem(withTitle: "没有执行中的任务", action: nil, keyEquivalent: "")
         } else {
-            menu.addItem(withTitle: "执行中（\(running.count)）— 点击看进度", action: nil, keyEquivalent: "")
+            menu.addItem(withTitle: "执行中（\(running.count)）— 点击跳转", action: nil, keyEquivalent: "")
             for t in running.prefix(8) {
                 let item = menu.addItem(withTitle: "  " + t.title,
                                         action: #selector(openTaskResult(_:)), keyEquivalent: "")
@@ -1633,7 +1638,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         menu.addItem(.separator())
 
         if !unread.isEmpty {
-            menu.addItem(withTitle: "完成未读（\(unread.count)）— 点击看结果", action: nil, keyEquivalent: "")
+            menu.addItem(withTitle: "完成未读（\(unread.count)）— 点击跳转", action: nil, keyEquivalent: "")
             for t in unread.prefix(10) {
                 let prefix = t.status == "error" ? "⚠️ " : "✅ "
                 let item = menu.addItem(withTitle: "  " + prefix + shortTitle(t.title),
@@ -1695,8 +1700,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     @objc private func openTaskResult(_ sender: NSMenuItem) {
+        // 菜单与清单同语义：直达 ZCode 对应工作区（弹窗只留给通知点击）
         guard let id = sender.representedObject as? String else { return }
-        showResultPanel(taskId: id)
+        jumpToZCode(workspacePath: rowsById[id]?.workspacePath)
     }
 
     // MARK: 宠物点击 → 任务清单 popover
@@ -1716,13 +1722,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let prefix = String(key[..<sep])
         let id = String(key[key.index(after: sep)...])
         TaskListPopover.shared.close()
-        if prefix == "run" {
-            if let ws = lastRunning.first(where: { $0.id == id })?.ws, !ws.isEmpty {
-                jumpToZCode(workspacePath: ws)
-            }
-        } else {
-            showResultPanel(taskId: id)
-        }
+        // 清单点击=直达 ZCode（用户 v0.6.1）：执行中跳该工作区；未读也跳（弹窗只留给通知点击）
+        let ws = prefix == "run"
+            ? lastRunning.first(where: { $0.id == id })?.ws
+            : lastUnread.first(where: { $0.id == id })?.workspacePath
+        jumpToZCode(workspacePath: ws)
     }
 
     /// 任务结果面板：标题/状态/完成时间来自 tasks-index 快照，正文来自 cli 消息库。
