@@ -1,0 +1,18 @@
+{
+  "name": "zcode-pet",
+  "description": "zcode-pet plugin marketplace",
+  "plugins": [
+    {
+      "name": "zcode-pet",
+      "source": "./plugins/zcode-pet",
+      "version": "0.1.0",
+      "description": "ZCode desktop pet: floating pet + menu bar show the running task count, tiered alerts when tasks finish or fail",
+      "displayName": "zcode-pet 桌面宠物",
+      "displayName_i18n": { "zh-CN": "zcode-pet 桌面宠物" },
+      "description_i18n": {
+        "zh-CN": "ZCode 桌面宠物：悬浮宠物+菜单栏实时显示执行中任务数；任务完成分级提醒（系统通知/必须点掉的弹窗）"
+      },
+      "category": "productivity"
+    }
+  ]
+}

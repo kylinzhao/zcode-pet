@@ -1,0 +1,12 @@
+# 本地开发残留
+.video_agent/
+.DS_Store
+
+# 构建产物
+build/
+*.o
+*.d
+
+# 内部调研文档（本地保留，不公开）
+issues/
+README-research-2026-09-21.md

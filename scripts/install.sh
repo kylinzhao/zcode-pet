@@ -1,0 +1,75 @@
+#!/bin/bash
+# 安装：编译守护进程进 .app bundle（UN 可点击通知要求正规 bundle）→ ad-hoc 签名
+#      → 写入并加载 LaunchAgent（开机自启）→ 立即启动
+# 卸载：scripts/uninstall.sh
+set -euo pipefail
+
+ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+DATA_DIR="$HOME/.zcode-pet"
+APP_BUNDLE="$DATA_DIR/zcode-pet.app"
+EXE="$APP_BUNDLE/Contents/MacOS/zcode-pet-daemon"
+PLIST="$HOME/Library/LaunchAgents/dev.zcode.pet.plist"
+
+echo "[1/6] 编译守护进程到 .app bundle..."
+mkdir -p "$APP_BUNDLE/Contents/MacOS"
+swiftc -O "$ROOT/daemon/main.swift" -o "$EXE"
+
+cat > "$APP_BUNDLE/Contents/Info.plist" <<'EOF'
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>CFBundleExecutable</key><string>zcode-pet-daemon</string>
+  <key>CFBundleIdentifier</key><string>dev.zcode.pet</string>
+  <key>CFBundleName</key><string>zcode-pet</string>
+  <key>CFBundleDisplayName</key><string>zcode-pet</string>
+  <key>CFBundlePackageType</key><string>APPL</string>
+  <key>CFBundleShortVersionString</key><string>0.4.0</string>
+  <key>LSUIElement</key><true/>
+  <key>NSHighResolutionCapable</key><true/>
+</dict>
+</plist>
+EOF
+
+codesign --force -s - "$APP_BUNDLE" >/dev/null 2>&1 || echo "  (ad-hoc 签名跳过，通知可能不可用)"
+
+chmod +x "$ROOT/plugins/zcode-pet/hooks/pet_hook.sh"
+rm -rf "$DATA_DIR/bin" 2>/dev/null || true
+
+echo "[2/6] 自检..."
+"$EXE" --test
+
+echo "[3/6] 写入 LaunchAgent..."
+cat > "$PLIST" <<EOF
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key><string>dev.zcode.pet</string>
+  <key>ProgramArguments</key>
+  <array><string>$EXE</string></array>
+  <key>RunAtLoad</key><true/>
+  <key>KeepAlive</key><false/>
+  <key>ProcessType</key><string>Adaptive</string>
+  <key>StandardOutPath</key><string>$DATA_DIR/daemon.log</string>
+  <key>StandardErrorPath</key><string>$DATA_DIR/daemon.log</string>
+</dict>
+</plist>
+EOF
+
+echo "[4/6] 加载并启动..."
+launchctl bootout "gui/$UID/dev.zcode.pet" 2>/dev/null || true
+sleep 2
+if ! launchctl bootstrap "gui/$UID" "$PLIST" 2>/dev/null; then
+  sleep 2
+  launchctl bootstrap "gui/$UID" "$PLIST"
+fi
+launchctl kickstart "gui/$UID/dev.zcode.pet"
+
+echo "[5/6] 清理旧实例..."
+pkill -f "zcode-pet/bin/zcode-pet-daemon" 2>/dev/null || true
+
+echo "[6/6] 完成 ✅"
+echo "  守护进程 : ${EXE}（登录自启，SessionStart hook 兜底拉起）"
+echo "  首次运行 : macOS 会弹\"zcode-pet 想给你发送通知\"— 请点【允许】（点击通知跳转任务需要它）"
+echo "  日志     : $DATA_DIR/daemon.log"
