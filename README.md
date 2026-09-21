@@ -9,7 +9,7 @@
 😿 任务出错了 ⚠️            ← 有任务失败（颤抖动画 + 必须点掉的弹窗）
 ```
 
-菜单栏 `🐾 N 📬M`：N = 执行中任务数，M = 未读完成数。下拉可看清单（**点击直达对应工作区**）、切换 15 款 emoji 皮肤（猫/狗/熊猫/企鹅/火箭/机器人/幽灵…）、静音。
+菜单栏 `🐾 N 📬M`：N = 执行中任务数，M = 未读完成数。下拉可看清单（**点击直达对应工作区**）、切换 17 款皮肤——14 款 emoji（猫/狗/熊猫/企鹅/火箭/机器人/幽灵…）+ 3 款代码手绘（**樱木花道、恐龙、白兵**，待机/执行/庆祝/出错四种状态各画各的姿势表情）、静音。
 
 ## 功能
 
@@ -54,7 +54,7 @@ bash scripts/install.sh
 ## 日常使用
 
 - **点宠物** = 跳回 ZCode；**按住拖动** = 挪位置（自动记忆）
-- **菜单栏 🐾**：执行中/未读清单（点击直达）、宠物造型（15 款皮肤）、静音 30 分钟、Stop hook 心跳、退出
+- **菜单栏 🐾**：执行中/未读清单（点击直达）、宠物造型（17 款皮肤）、静音 30 分钟、Stop hook 心跳、退出
 - **改配置**（可选）：`~/.zcode-pet/config.json`
 
 ```json
@@ -114,5 +114,7 @@ bash scripts/install.sh    # 改 daemon/main.swift 后重跑即重新编译部�
 
 - 守护进程：`daemon/main.swift`（Swift/AppKit 单文件，皮肤表 `petSkins`、轮询状态机、UN 通知）
 - 插件：`plugins/zcode-pet/`（SessionStart 拉起守护进程、UserPromptSubmit/Stop 转发回合事件）
+- **手绘皮肤**：`PetSkin.art` 闭包非 nil 即手绘（NSBezierPath 代码作画，104×68 画布），面板走
+  `NSImageView`、通知图标走同一套渲染；改完可 `~/.zcode-pet/zcode-pet.app/Contents/MacOS/zcode-pet-daemon --render-art /tmp/pet-art` 导出 PNG 自检
 
 MIT License

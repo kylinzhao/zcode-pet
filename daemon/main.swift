@@ -20,6 +20,9 @@
 // v0.5.3 最小化唤起：activate() 后台调用不恢复最小化窗口，改 open app URL（=Dock 点击）。
 // v0.6 宠物点击改任务清单：点宠物在旁边弹 popover 列出执行中/完成未读任务；
 //     点执行中项 → --open-workspace 跳该任务的工作区窗口；点未读项 → 任务结果面板。
+// v0.7 手绘皮肤：PetSkin 支持可选 art 闭包（NSBezierPath 代码作画，4 种状态各画各的），
+//     面板走 NSImageView、通知图标走同一套渲染；新增樱木花道/白兵，恐龙(trex)由 emoji
+//     重绘为手绘。--render-art <dir> 可导出全部手绘皮肤的 PNG 自检。
 //
 // 构建：bash scripts/install.sh（编译进 .app bundle + ad-hoc 签名）；自检：--test。
 
@@ -216,12 +219,27 @@ struct PetState {
 
 enum PetMode { case idle, working, celebrate, error }
 
-// MARK: - 宠物造型（emoji 皮肤）
+// MARK: - 宠物造型（emoji 皮肤 + 手绘皮肤）
 
 struct PetSkin {
     let id: String
     let name: String
+    let glyph: String                      // 菜单里的代表 emoji（手绘皮肤也用 emoji 当小图标）
     let idle: String, working: String, celebrate: String, error: String
+    let art: ((PetMode, NSRect) -> Void)?  // 非 nil = 手绘皮肤：面板/通知图标走代码作画，emoji 仅兜底
+
+    init(id: String, name: String, glyph: String? = nil,
+         idle: String, working: String, celebrate: String, error: String,
+         art: ((PetMode, NSRect) -> Void)? = nil) {
+        self.id = id
+        self.name = name
+        self.glyph = glyph ?? idle
+        self.idle = idle
+        self.working = working
+        self.celebrate = celebrate
+        self.error = error
+        self.art = art
+    }
 
     func emoji(for mode: PetMode) -> String {
         switch mode {
@@ -235,6 +253,8 @@ struct PetSkin {
 
 let petSkins: [PetSkin] = [
     .init(id: "cat", name: "橘猫", idle: "😺", working: "😸", celebrate: "🎉", error: "😿"),
+    .init(id: "sakuragi", name: "樱木花道", idle: "🏀", working: "🏀", celebrate: "🎉", error: "😵",
+          art: { PetArt.sakuragi($0, in: $1) }),
     .init(id: "blackcat", name: "黑猫", idle: "🐈‍⬛", working: "🐈‍⬛", celebrate: "🎉", error: "😿"),
     .init(id: "dog", name: "小狗", idle: "🐶", working: "🐕", celebrate: "🎉", error: "🥺"),
     .init(id: "panda", name: "熊猫", idle: "🐼", working: "🐼", celebrate: "🎉", error: "😖"),
@@ -242,7 +262,10 @@ let petSkins: [PetSkin] = [
     .init(id: "penguin", name: "企鹅", idle: "🐧", working: "🐧", celebrate: "🎉", error: "😵"),
     .init(id: "chick", name: "小黄鸭", idle: "🐤", working: "🐥", celebrate: "🎉", error: "😵‍💫"),
     .init(id: "frog", name: "青蛙", idle: "🐸", working: "🐸", celebrate: "🎉", error: "😵"),
-    .init(id: "trex", name: "恐龙", idle: "🦖", working: "🦕", celebrate: "🎉", error: "😵"),
+    .init(id: "trex", name: "恐龙", idle: "🦖", working: "🦕", celebrate: "🎉", error: "😵",
+          art: { PetArt.dino($0, in: $1) }),
+    .init(id: "trooper", name: "白兵", idle: "🪖", working: "🪖", celebrate: "🎉", error: "😵",
+          art: { PetArt.trooper($0, in: $1) }),
     .init(id: "unicorn", name: "独角兽", idle: "🦄", working: "🦄", celebrate: "🎉", error: "😵"),
     .init(id: "robot", name: "机器人", idle: "🤖", working: "🤖", celebrate: "🎉", error: "👾"),
     .init(id: "ghost", name: "幽灵", idle: "👻", working: "👻", celebrate: "🎉", error: "💀"),
@@ -254,6 +277,397 @@ let petSkins: [PetSkin] = [
 func currentSkin() -> PetSkin {
     let id = PetState.load().skinId
     return petSkins.first { $0.id == id } ?? petSkins[0]
+}
+
+// MARK: - 手绘宠物（NSBezierPath 代码作画，非 emoji 皮肤）
+//
+// 画布逻辑坐标 104×68（与宠物面板 art 区域同比例，原点左下），等比缩放居中画进目标 rect。
+// 每个角色按 PetMode 画不同姿势/表情。--render-art <dir> 可导出全部 PNG 肉眼自检。
+
+enum PetArt {
+    static let W: CGFloat = 104
+    static let H: CGFloat = 68
+
+    private static let ink = NSColor(red: 0.16, green: 0.13, blue: 0.10, alpha: 1)
+    private static let white = NSColor.white
+
+    // MARK: 渲染入口
+
+    /// 把 art 闭包按画布坐标等比缩放居中画进 rect
+    static func render(art: (PetMode, NSRect) -> Void, mode: PetMode, in rect: NSRect) {
+        NSGraphicsContext.saveGraphicsState()
+        let scale = min(rect.width / W, rect.height / H)
+        let t = NSAffineTransform()
+        t.translateX(by: rect.midX - W * scale / 2, yBy: rect.midY - H * scale / 2)
+        t.scaleX(by: scale, yBy: scale)
+        t.concat()
+        art(mode, NSRect(origin: .zero, size: NSSize(width: W, height: H)))
+        NSGraphicsContext.restoreGraphicsState()
+    }
+
+    /// 2x 位图（Retina 清晰），给面板 NSImageView 用
+    static func image(skin: PetSkin, mode: PetMode) -> NSImage {
+        let rep = bitmap(skin: skin, mode: mode, scale: 2)
+        let img = NSImage(size: rep.size)
+        img.addRepresentation(rep)
+        return img
+    }
+
+    private static func bitmap(skin: PetSkin, mode: PetMode, scale: CGFloat) -> NSBitmapImageRep {
+        let w = W * scale, h = H * scale
+        let rep = NSBitmapImageRep(bitmapDataPlanes: nil, pixelsWide: Int(w), pixelsHigh: Int(h),
+                                   bitsPerSample: 8, samplesPerPixel: 4, hasAlpha: true, isPlanar: false,
+                                   colorSpaceName: .deviceRGB, bytesPerRow: 0, bitsPerPixel: 0)!
+        rep.size = NSSize(width: W, height: H)
+        NSGraphicsContext.saveGraphicsState()
+        NSGraphicsContext.current = NSGraphicsContext(bitmapImageRep: rep)
+        render(art: skin.art!, mode: mode, in: NSRect(origin: .zero, size: rep.size))
+        NSGraphicsContext.restoreGraphicsState()
+        return rep
+    }
+
+    /// --render-art：导出全部手绘皮肤的 4 种状态 + 图标效果 PNG，返回失败数
+    @discardableResult
+    static func exportAll(to dir: String) -> Int32 {
+        try? FileManager.default.createDirectory(atPath: dir, withIntermediateDirectories: true)
+        var failures = 0
+        for skin in petSkins where skin.art != nil {
+            for mode in [PetMode.idle, .working, .celebrate, .error] {
+                let png = bitmap(skin: skin, mode: mode, scale: 4).representation(using: .png, properties: [:])
+                let path = (dir as NSString).appendingPathComponent("\(skin.id)-\(modeName(mode)).png")
+                if let png {
+                    do { try png.write(to: URL(fileURLWithPath: path)) } catch { failures += 1 }
+                } else { failures += 1 }
+            }
+            let iconPath = (dir as NSString).appendingPathComponent("\(skin.id)-icon.png")
+            if !AppIconManager.renderIconPNG(skin: skin, pixels: 512, to: URL(fileURLWithPath: iconPath)) { failures += 1 }
+        }
+        print("render-art done → \(dir) (failures: \(failures))")
+        return Int32(failures)
+    }
+
+    private static func modeName(_ m: PetMode) -> String {
+        switch m {
+        case .idle: return "idle"
+        case .working: return "working"
+        case .celebrate: return "celebrate"
+        case .error: return "error"
+        }
+    }
+
+    // MARK: 图元
+
+    private static func fill(_ c: NSColor, _ p: NSBezierPath) { c.setFill(); p.fill() }
+
+    private static func ellipse(_ cx: CGFloat, _ cy: CGFloat, _ rx: CGFloat, _ ry: CGFloat, _ c: NSColor) {
+        fill(c, NSBezierPath(ovalIn: NSRect(x: cx - rx, y: cy - ry, width: rx * 2, height: ry * 2)))
+    }
+
+    private static func rrect(_ x: CGFloat, _ y: CGFloat, _ w: CGFloat, _ h: CGFloat, _ r: CGFloat, _ c: NSColor) {
+        fill(c, NSBezierPath(roundedRect: NSRect(x: x, y: y, width: w, height: h), xRadius: r, yRadius: r))
+    }
+
+    private static func poly(_ pts: [NSPoint], _ c: NSColor) {
+        guard let first = pts.first else { return }
+        let p = NSBezierPath()
+        p.move(to: first)
+        for q in pts.dropFirst() { p.line(to: q) }
+        p.close()
+        fill(c, p)
+    }
+
+    private static func stroke(_ pts: [NSPoint], _ w: CGFloat, _ c: NSColor) {
+        guard let first = pts.first else { return }
+        let p = NSBezierPath()
+        p.move(to: first)
+        for q in pts.dropFirst() { p.line(to: q) }
+        c.setStroke()
+        p.lineWidth = w
+        p.lineCapStyle = .round
+        p.lineJoinStyle = .round
+        p.stroke()
+    }
+
+    /// 二次曲线（控制点同用两次 ≈ quadratic），画笑弧/眉毛
+    private static func curve(from: NSPoint, to: NSPoint, ctrl: NSPoint, _ w: CGFloat, _ c: NSColor) {
+        let p = NSBezierPath()
+        p.move(to: from)
+        p.curve(to: to, controlPoint1: ctrl, controlPoint2: ctrl)
+        c.setStroke()
+        p.lineWidth = w
+        p.lineCapStyle = .round
+        p.stroke()
+    }
+
+    private static func text(_ s: String, _ size: CGFloat, _ c: NSColor, _ cx: CGFloat, _ cy: CGFloat) {
+        let str = NSAttributedString(string: s, attributes: [
+            .font: NSFont.boldSystemFont(ofSize: size), .foregroundColor: c])
+        let b = str.boundingRect(with: NSSize(width: 400, height: 400), options: [.usesLineFragmentOrigin])
+        str.draw(at: NSPoint(x: cx - b.width / 2 - b.origin.x, y: cy - b.height / 2 - b.origin.y))
+    }
+
+    /// 汗滴（紧张/出错通用）
+    private static func sweat(_ cx: CGFloat, _ cy: CGFloat, _ s: CGFloat = 1) {
+        let blue = NSColor(red: 0.40, green: 0.72, blue: 0.98, alpha: 1)
+        poly([NSPoint(x: cx - 2.6 * s, y: cy + 1.2 * s), NSPoint(x: cx + 2.6 * s, y: cy + 1.2 * s),
+              NSPoint(x: cx, y: cy + 6.6 * s)], blue)
+        ellipse(cx, cy, 3.0 * s, 3.4 * s, blue)
+    }
+
+    // MARK: 恐龙（手绘 trex：绿皮肤 + 背角刺 + 浅色口鼻）
+
+    static func dino(_ mode: PetMode, in r: NSRect) {
+        let green = NSColor(red: 0.33, green: 0.70, blue: 0.36, alpha: 1)
+        let darkGreen = NSColor(red: 0.20, green: 0.48, blue: 0.24, alpha: 1)
+        let light = NSColor(red: 0.82, green: 0.92, blue: 0.72, alpha: 1)
+        let tongue = NSColor(red: 0.88, green: 0.35, blue: 0.40, alpha: 1)
+
+        // 手臂（先画，被头型压住一半，看起来从身后伸出）
+        switch mode {
+        case .celebrate:
+            stroke([NSPoint(x: 22, y: 20), NSPoint(x: 14, y: 37)], 9, green)
+            stroke([NSPoint(x: 82, y: 20), NSPoint(x: 90, y: 37)], 9, green)
+        case .working:
+            stroke([NSPoint(x: 20, y: 18), NSPoint(x: 15, y: 26)], 9, green)
+            stroke([NSPoint(x: 80, y: 20), NSPoint(x: 88, y: 34)], 9, green)
+        default:
+            ellipse(17, 18, 5.5, 8, green)
+            ellipse(87, 18, 5.5, 8, green)
+        }
+
+        // 头 + 背角刺
+        rrect(22, 12, 60, 50, 24, green)
+        poly([NSPoint(x: 39, y: 59), NSPoint(x: 46, y: 59), NSPoint(x: 42.5, y: 66)], darkGreen)
+        poly([NSPoint(x: 49, y: 61), NSPoint(x: 55, y: 61), NSPoint(x: 52, y: 67)], darkGreen)
+        poly([NSPoint(x: 58, y: 59), NSPoint(x: 65, y: 59), NSPoint(x: 61.5, y: 66)], darkGreen)
+
+        // 浅色口鼻 + 鼻孔 + 腮红
+        ellipse(52, 22, 22, 12, light)
+        ellipse(45.5, 29.5, 1.6, 2, darkGreen)
+        ellipse(58.5, 29.5, 1.6, 2, darkGreen)
+        ellipse(28, 37, 4, 2.2, light.withAlphaComponent(0.6))
+        ellipse(76, 37, 4, 2.2, light.withAlphaComponent(0.6))
+
+        switch mode {
+        case .idle:
+            for cx in [40.0, 64.0] {
+                ellipse(cx, 45, 5.5, 6.2, white)
+                ellipse(cx + 0.6, 45.5, 2.5, 2.8, ink)
+                ellipse(cx + 1.6, 46.6, 0.9, 0.9, white)
+            }
+            curve(from: NSPoint(x: 43, y: 22), to: NSPoint(x: 61, y: 22), ctrl: NSPoint(x: 52, y: 17.5), 2.4, darkGreen)
+        case .working:
+            // 专注：上眼皮压半只眼，瞳孔下移看活
+            for cx in [40.0, 64.0] {
+                ellipse(cx, 45, 5.5, 6.2, white)
+                ellipse(cx + 0.6, 43.8, 2.5, 2.8, ink)
+                fill(green, NSBezierPath(rect: NSRect(x: cx - 5.5, y: 47.5, width: 11, height: 5)))
+                ellipse(cx, 47.5, 5.5, 1.2, darkGreen)
+            }
+            stroke([NSPoint(x: 44, y: 20), NSPoint(x: 60, y: 20)], 2.4, darkGreen)
+            sweat(84, 46, 0.9)
+        case .celebrate:
+            // 眯眼笑 ^ ^
+            curve(from: NSPoint(x: 35, y: 44), to: NSPoint(x: 45, y: 44), ctrl: NSPoint(x: 40, y: 50), 2.6, ink)
+            curve(from: NSPoint(x: 59, y: 44), to: NSPoint(x: 69, y: 44), ctrl: NSPoint(x: 64, y: 50), 2.6, ink)
+            rrect(40, 16, 24, 11, 5.5, ink)
+            ellipse(52, 17.5, 7, 3.4, tongue)
+        case .error:
+            for cx in [40.0, 64.0] {
+                stroke([NSPoint(x: cx - 4, y: 41.5), NSPoint(x: cx + 4, y: 48.5)], 2.4, ink)
+                stroke([NSPoint(x: cx - 4, y: 48.5), NSPoint(x: cx + 4, y: 41.5)], 2.4, ink)
+            }
+            curve(from: NSPoint(x: 44, y: 22), to: NSPoint(x: 60, y: 22), ctrl: NSPoint(x: 52, y: 26.5), 2.4, darkGreen)
+            sweat(85, 47, 1.05)
+        }
+    }
+
+    // MARK: 樱木花道（灌篮高手 10 号：红发刺头 + 湘北球衣 + 篮球）
+
+    static func sakuragi(_ mode: PetMode, in r: NSRect) {
+        let hair = NSColor(red: 0.86, green: 0.23, blue: 0.16, alpha: 1)
+        let skinTone = NSColor(red: 1.0, green: 0.87, blue: 0.71, alpha: 1)
+        let jersey = NSColor(red: 0.73, green: 0.10, blue: 0.14, alpha: 1)
+        let ink2 = NSColor(red: 0.20, green: 0.11, blue: 0.08, alpha: 1)
+        let ballColor = NSColor(red: 0.93, green: 0.55, blue: 0.16, alpha: 1)
+        let ballSeam = NSColor(red: 0.45, green: 0.22, blue: 0.05, alpha: 1)
+
+        func basketball(_ cx: CGFloat, _ cy: CGFloat, _ rad: CGFloat) {
+            ellipse(cx, cy, rad, rad, ballColor)
+            let p = NSBezierPath()
+            p.move(to: NSPoint(x: cx - rad, y: cy)); p.line(to: NSPoint(x: cx + rad, y: cy))
+            p.move(to: NSPoint(x: cx, y: cy - rad)); p.line(to: NSPoint(x: cx, y: cy + rad))
+            ballSeam.setStroke(); p.lineWidth = 1.3; p.stroke()
+            for side in [-1.0, 1.0] {
+                let a = NSBezierPath()
+                a.appendArc(withCenter: NSPoint(x: cx + side * rad * 1.55, y: cy), radius: rad * 1.2,
+                            startAngle: side < 0 ? -35 : 145, endAngle: side < 0 ? 35 : 215)
+                ballSeam.setStroke(); a.lineWidth = 1.3; a.stroke()
+            }
+        }
+
+        // 篮球 + 手臂（先画，球衣和头压在上面）
+        switch mode {
+        case .idle:
+            basketball(88, 11, 8)
+            ellipse(26, 13, 5, 9, skinTone)
+            ellipse(78, 13, 5, 9, skinTone)
+        case .working:
+            basketball(88, 7, 7)
+            // 拍球运动线
+            stroke([NSPoint(x: 81, y: 18.5), NSPoint(x: 85, y: 20)], 1.6, skinTone)
+            stroke([NSPoint(x: 89, y: 17), NSPoint(x: 94, y: 18.5)], 1.6, skinTone)
+            ellipse(26, 13, 5, 9, skinTone)
+            stroke([NSPoint(x: 74, y: 17), NSPoint(x: 83, y: 9.5)], 7.5, skinTone)
+        case .celebrate:
+            stroke([NSPoint(x: 27, y: 17), NSPoint(x: 21, y: 33)], 8, skinTone)
+            stroke([NSPoint(x: 77, y: 17), NSPoint(x: 83, y: 33)], 8, skinTone)
+            basketball(87, 45, 6.5)
+        case .error:
+            ellipse(26, 13, 5, 9, skinTone)
+            ellipse(78, 13, 5, 9, skinTone)
+            sweat(80, 46)
+        }
+
+        // 球衣（湘北红 + 白肩带 + 10 号）
+        rrect(32, 0, 40, 23, 9, jersey)
+        rrect(33, 16, 9, 7, 3, white)
+        rrect(62, 16, 9, 7, 3, white)
+        text("10", 11, white, 52, 8.5)
+
+        // 头
+        ellipse(52, 40, 23, 23, skinTone)
+
+        // 头发：标志刺头顶 + M 形发际线
+        poly([NSPoint(x: 29, y: 45), NSPoint(x: 27.5, y: 53), NSPoint(x: 33, y: 59),
+              NSPoint(x: 37, y: 55.5), NSPoint(x: 42, y: 63), NSPoint(x: 47, y: 57.5),
+              NSPoint(x: 52, y: 65), NSPoint(x: 57, y: 57.5), NSPoint(x: 62, y: 63),
+              NSPoint(x: 67, y: 55.5), NSPoint(x: 71, y: 59), NSPoint(x: 76.5, y: 53),
+              NSPoint(x: 75, y: 45),
+              NSPoint(x: 66, y: 47.5), NSPoint(x: 57, y: 47.5), NSPoint(x: 52, y: 43),
+              NSPoint(x: 47, y: 47.5), NSPoint(x: 38, y: 47.5)], hair)
+        rrect(28.5, 38, 5, 9, 2.5, hair)
+        rrect(70.5, 38, 5, 9, 2.5, hair)
+
+        // 眉毛：干劲 = 眉尾高眉心低；出错 = 担忧眉（反转）
+        switch mode {
+        case .error:
+            stroke([NSPoint(x: 37, y: 44), NSPoint(x: 47, y: 46.5)], 2.8, ink2)
+            stroke([NSPoint(x: 57, y: 46.5), NSPoint(x: 67, y: 44)], 2.8, ink2)
+        default:
+            stroke([NSPoint(x: 37, y: 45.5), NSPoint(x: 47, y: 42.5)], 2.8, ink2)
+            stroke([NSPoint(x: 57, y: 42.5), NSPoint(x: 67, y: 45.5)], 2.8, ink2)
+        }
+
+        // 眼睛
+        for (cx, dx) in [(43.0, 0.8), (61.0, -0.8)] {
+            ellipse(cx, 35.5, 4.6, 5.4, white)
+            ellipse(cx + dx, 35.8, 2.3, 2.7, ink2)
+            ellipse(cx + dx + 0.9, 37.0, 0.8, 0.8, white)
+        }
+
+        // 嘴
+        switch mode {
+        case .idle:
+            grin(w: 15, h: 7, cy: 27, ink: ink2)
+        case .working:
+            rrect(44.5, 24.5, 15, 4.5, 2.2, ink2)                       // 咬牙
+            stroke([NSPoint(x: 46.5, y: 26.7), NSPoint(x: 57.5, y: 26.7)], 1.4, white)
+        case .celebrate:
+            grin(w: 19, h: 9, cy: 27, ink: ink2, tongue: true)
+        case .error:
+            curve(from: NSPoint(x: 45, y: 25), to: NSPoint(x: 59, y: 25), ctrl: NSPoint(x: 52, y: 28.5), 2.4, ink2)
+        }
+    }
+
+    /// 张嘴大笑（上半直线下弯月形 + 牙 + 可选舌头），樱木专用
+    private static func grin(w: CGFloat, h: CGFloat, cy: CGFloat, ink: NSColor, tongue: Bool = false) {
+        let p = NSBezierPath()
+        p.move(to: NSPoint(x: 52 - w / 2, y: cy))
+        p.curve(to: NSPoint(x: 52 + w / 2, y: cy),
+                controlPoint1: NSPoint(x: 52 - w * 0.3, y: cy - h), controlPoint2: NSPoint(x: 52 + w * 0.3, y: cy - h))
+        p.close()
+        ink.setFill(); p.fill()
+        let teeth = NSBezierPath()
+        teeth.move(to: NSPoint(x: 52 - w / 2 + 2, y: cy - 0.4))
+        teeth.line(to: NSPoint(x: 52 + w / 2 - 2, y: cy - 0.4))
+        teeth.line(to: NSPoint(x: 52 + w / 2 - 3.5, y: cy - 2.6))
+        teeth.line(to: NSPoint(x: 52 - w / 2 + 3.5, y: cy - 2.6))
+        teeth.close()
+        white.setFill(); teeth.fill()
+        if tongue { ellipse(52, cy - h * 0.55, 4, 2.2, NSColor(red: 0.85, green: 0.35, blue: 0.40, alpha: 1)) }
+    }
+
+    // MARK: 星球大战白兵（白盔黑 visor + 皱眉通气管 + 白色装甲）
+
+    static func trooper(_ mode: PetMode, in r: NSRect) {
+        let armor = NSColor(calibratedWhite: 0.96, alpha: 1)
+        let shade = NSColor(calibratedWhite: 0.78, alpha: 1)
+        let visor = NSColor(red: 0.07, green: 0.07, blue: 0.09, alpha: 1)
+        let gray = NSColor(calibratedWhite: 0.55, alpha: 1)
+
+        // 手臂（先画）
+        switch mode {
+        case .celebrate:
+            stroke([NSPoint(x: 26, y: 16), NSPoint(x: 20, y: 34)], 8, armor)
+            stroke([NSPoint(x: 78, y: 16), NSPoint(x: 84, y: 34)], 8, armor)
+        default:
+            ellipse(25, 12, 5.5, 9, armor)
+            ellipse(79, 12, 5.5, 9, armor)
+        }
+
+        // 躯干装甲 + 肩甲 + 腰带
+        ellipse(31, 19, 8, 5.5, shade)
+        ellipse(73, 19, 8, 5.5, shade)
+        rrect(33, 0, 38, 23, 9, armor)
+        rrect(33, 2.5, 38, 4, 2, NSColor(calibratedWhite: 0.30, alpha: 1))
+        if mode != .working {
+            rrect(44, 9, 5, 4.5, 1.2, gray)
+            rrect(55, 9, 5, 4.5, 1.2, gray)
+        } else {
+            // E-11 爆能枪横持胸前（枪身压住胸口细节，白色圆点 = 握枪的手）
+            stroke([NSPoint(x: 31, y: 16), NSPoint(x: 45, y: 14)], 6, armor)
+            stroke([NSPoint(x: 73, y: 16), NSPoint(x: 59, y: 14)], 6, armor)
+            rrect(40, 12.5, 32, 3.5, 1.75, visor)     // 枪身
+            rrect(42, 11.5, 12, 5.5, 2, visor)        // 机匣
+            rrect(45, 17, 8, 3, 1.5, visor)           // 瞄准镜
+            rrect(46, 6.5, 4, 5.5, 1.5, visor)        // 握把
+            ellipse(47, 14, 3.6, 3.6, armor)
+            ellipse(58, 14, 3.6, 3.6, armor)
+        }
+
+        // 头盔：颅顶 + 面甲下缘 + 盔顶中线/眉脊
+        ellipse(52, 42, 22, 19, armor)
+        ellipse(52, 29, 19.5, 11.5, armor)
+        stroke([NSPoint(x: 52, y: 61), NSPoint(x: 52, y: 52.5)], 1.6, shade)
+        curve(from: NSPoint(x: 33, y: 45), to: NSPoint(x: 71, y: 45), ctrl: NSPoint(x: 52, y: 52.5), 1.4, shade)
+
+        // 眼睛（visor）
+        switch mode {
+        case .celebrate:
+            curve(from: NSPoint(x: 38.5, y: 41), to: NSPoint(x: 48, y: 41), ctrl: NSPoint(x: 43.2, y: 46.5), 3, visor)
+            curve(from: NSPoint(x: 56, y: 41), to: NSPoint(x: 65.5, y: 41), ctrl: NSPoint(x: 60.8, y: 46.5), 3, visor)
+            ellipse(22, 50, 2, 2, NSColor(red: 0.95, green: 0.75, blue: 0.20, alpha: 1))
+            ellipse(86, 54, 2.2, 2.2, NSColor(red: 0.90, green: 0.35, blue: 0.30, alpha: 1))
+            ellipse(52, 66, 1.8, 1.8, NSColor(red: 0.35, green: 0.70, blue: 0.90, alpha: 1))
+        case .error:
+            ellipse(43.2, 42, 4.6, 5.2, visor)
+            ellipse(60.8, 42, 4.6, 5.2, visor)
+            // 盔顶裂纹
+            stroke([NSPoint(x: 47, y: 57.5), NSPoint(x: 52, y: 54), NSPoint(x: 49, y: 51), NSPoint(x: 54, y: 47.5)], 1.5, gray)
+            sweat(77, 50)
+        default:
+            ellipse(43.2, 42, 4.6, 5.2, visor)
+            ellipse(60.8, 42, 4.6, 5.2, visor)
+            ellipse(41.8, 43.8, 1.1, 1.1, white)
+            ellipse(59.4, 43.8, 1.1, 1.1, white)
+        }
+
+        // 标志性皱眉通气管（灰鼻梁条 + 黑色下收梯形）
+        rrect(48, 38, 8, 2.2, 1.1, gray)
+        poly([NSPoint(x: 46.5, y: 34.5), NSPoint(x: 57.5, y: 34.5), NSPoint(x: 55.5, y: 29), NSPoint(x: 48.5, y: 29)], visor)
+        rrect(46, 33.6, 12, 2.6, 1.3, visor)
+    }
 }
 
 // MARK: - App 图标（跟随宠物皮肤）
@@ -275,7 +689,7 @@ enum AppIconManager {
             let current = (try? String(contentsOf: marker, encoding: .utf8))?
                 .trimmingCharacters(in: .whitespacesAndNewlines)
             guard current != skin.id else { return }
-            guard generate(emoji: skin.idle, to: res.appendingPathComponent("AppIcon.icns")) else { return }
+            guard generate(skin: skin, to: res.appendingPathComponent("AppIcon.icns")) else { return }
             try? skin.id.write(to: marker, atomically: true, encoding: .utf8)
             _ = run("/usr/bin/codesign", ["--force", "-s", "-", bundle.bundlePath])
             _ = run("/usr/bin/killall", ["usernoted"])   // 通知横幅的图标缓存
@@ -285,20 +699,38 @@ enum AppIconManager {
 
     /// emoji → 全尺寸 iconset → iconutil 打包 icns（--gen-icon 命令行也走这里）
     static func generate(emoji: String, to dest: URL) -> Bool {
+        generateTo(dest) { size in drawEmoji(emoji, size: size) }
+    }
+
+    /// 皮肤 → icns：手绘皮肤画 art，emoji 皮肤画 emoji
+    static func generate(skin: PetSkin, to dest: URL) -> Bool {
+        guard skin.art != nil else { return generate(emoji: skin.idle, to: dest) }
+        return generateTo(dest) { size in drawArt(skin, size: size) }
+    }
+
+    /// 图标 PNG 预览（--render-art 自检用）
+    static func renderIconPNG(skin: PetSkin, pixels: Int, to url: URL) -> Bool {
+        guard skin.art != nil else {
+            return writePNG(content: { drawEmoji(skin.idle, size: $0) }, pixels: pixels, to: url)
+        }
+        return writePNG(content: { drawArt(skin, size: $0) }, pixels: pixels, to: url)
+    }
+
+    private static func generateTo(_ dest: URL, content: (CGFloat) -> Void) -> Bool {
         let tmp = FileManager.default.temporaryDirectory
             .appendingPathComponent("pet-icon-\(UUID().uuidString)", isDirectory: true)
         let iconset = tmp.appendingPathComponent("AppIcon.iconset", isDirectory: true)
         do { try FileManager.default.createDirectory(at: iconset, withIntermediateDirectories: true) } catch { return false }
         defer { try? FileManager.default.removeItem(at: tmp) }
         for s in sizes {
-            guard writePNG(emoji: emoji, pixels: s, to: iconset.appendingPathComponent("icon_\(s)x\(s).png")),
-                  writePNG(emoji: emoji, pixels: s * 2, to: iconset.appendingPathComponent("icon_\(s)x\(s)@2x.png"))
+            guard writePNG(content: content, pixels: s, to: iconset.appendingPathComponent("icon_\(s)x\(s).png")),
+                  writePNG(content: content, pixels: s * 2, to: iconset.appendingPathComponent("icon_\(s)x\(s)@2x.png"))
             else { return false }
         }
         return run("/usr/bin/iconutil", ["-c", "icns", iconset.path, "-o", dest.path]) == 0
     }
 
-    private static func writePNG(emoji: String, pixels: Int, to url: URL) -> Bool {
+    private static func writePNG(content: (CGFloat) -> Void, pixels: Int, to url: URL) -> Bool {
         let size = CGFloat(pixels)
         guard let rep = NSBitmapImageRep(bitmapDataPlanes: nil, pixelsWide: pixels, pixelsHigh: pixels,
                                          bitsPerSample: 8, samplesPerPixel: 4, hasAlpha: true, isPlanar: false,
@@ -308,7 +740,7 @@ enum AppIconManager {
         NSGraphicsContext.current = NSGraphicsContext(bitmapImageRep: rep)
         defer { NSGraphicsContext.restoreGraphicsState() }
         guard let ctx = NSGraphicsContext.current?.cgContext else { return false }
-        // 圆角底 + 暖色渐变（各皮肤共用同一配方，只有 emoji 变）
+        // 圆角底 + 暖色渐变（各皮肤共用同一配方，只有内容变）
         NSBezierPath(roundedRect: CGRect(origin: .zero, size: CGSize(width: size, height: size)),
                      xRadius: size * 0.22, yRadius: size * 0.22).addClip()
         let colors = [NSColor(srgbRed: 1.00, green: 0.80, blue: 0.48, alpha: 1).cgColor,
@@ -316,11 +748,20 @@ enum AppIconManager {
         if let grad = CGGradient(colorsSpace: CGColorSpace(name: CGColorSpace.sRGB), colors: colors, locations: [0, 1]) {
             ctx.drawLinearGradient(grad, start: CGPoint(x: 0, y: size), end: CGPoint(x: 0, y: 0), options: [])
         }
+        content(size)
+        guard let png = rep.representation(using: .png, properties: [:]) else { return false }
+        do { try png.write(to: url); return true } catch { return false }
+    }
+
+    private static func drawEmoji(_ emoji: String, size: CGFloat) {
         let str = NSAttributedString(string: emoji, attributes: [.font: NSFont.systemFont(ofSize: size * 0.62)])
         let b = str.boundingRect(with: NSSize(width: size, height: size), options: [.usesLineFragmentOrigin])
         str.draw(at: NSPoint(x: (size - b.width) / 2 - b.origin.x, y: (size - b.height) / 2 - b.origin.y))
-        guard let png = rep.representation(using: .png, properties: [:]) else { return false }
-        do { try png.write(to: url); return true } catch { return false }
+    }
+
+    private static func drawArt(_ skin: PetSkin, size: CGFloat) {
+        PetArt.render(art: skin.art!, mode: .idle,
+                      in: NSRect(x: size * 0.07, y: size * 0.10, width: size * 0.86, height: size * 0.80))
     }
 
     @discardableResult
@@ -615,6 +1056,8 @@ final class TaskListPopover {
 final class PetPanelController {
     private var panel: NSPanel!
     private var emojiField: NSTextField!
+    private var artView: NSImageView!          // 手绘皮肤画面
+    private var artCache: [String: NSImage] = [:]
     private var captionField: NSTextField!
     private var baseOrigin: NSPoint = .zero
     private var phase: Double = 0
@@ -648,11 +1091,16 @@ final class PetPanelController {
         container.wantsLayer = true
         container.layer?.cornerRadius = 18
         container.layer?.backgroundColor = NSColor(white: 0.10, alpha: 0.72).cgColor
+        container.layer?.masksToBounds = true
 
         emojiField = NSTextField(labelWithString: "😺")
         emojiField.font = .systemFont(ofSize: 42)
         emojiField.alignment = .center
         emojiField.frame = NSRect(x: 3, y: 44, width: 98, height: 58)
+
+        artView = NSImageView(frame: NSRect(x: 0, y: 40, width: 104, height: 68))
+        artView.imageScaling = .scaleNone
+        artView.isHidden = true
 
         captionField = NSTextField(labelWithString: "启动中…")
         captionField.font = .systemFont(ofSize: 11)
@@ -661,6 +1109,7 @@ final class PetPanelController {
         captionField.lineBreakMode = .byTruncatingTail
         captionField.frame = NSRect(x: 7, y: 20, width: 90, height: 22)
 
+        container.addSubview(artView)
         container.addSubview(emojiField)
         container.addSubview(captionField)
         p.contentView = container
@@ -697,8 +1146,19 @@ final class PetPanelController {
         if persist { onDragEndHandler?(baseOrigin) }
     }
 
-    func update(mode: PetMode, emoji: String, runningCount: Int, unreadCount: Int) {
-        emojiField.stringValue = emoji
+    func update(mode: PetMode, skin: PetSkin, runningCount: Int, unreadCount: Int) {
+        if skin.art != nil {
+            // 手绘皮肤：按 skin+mode 渲染一次并缓存
+            emojiField.isHidden = true
+            artView.isHidden = false
+            let key = "\(skin.id)-\(mode)"
+            if artCache[key] == nil { artCache[key] = PetArt.image(skin: skin, mode: mode) }
+            artView.image = artCache[key]
+        } else {
+            artView.isHidden = true
+            emojiField.isHidden = false
+            emojiField.stringValue = skin.emoji(for: mode)
+        }
         switch mode {
         case .idle:
             captionField.stringValue = unreadCount > 0 ? "休息中 💤 · \(unreadCount) 未读" : "休息中 💤"
@@ -950,7 +1410,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     private func poll() {
         guard let store else {
-            pet.update(mode: .idle, emoji: skin.emoji(for: .idle), runningCount: 0, unreadCount: 0)
+            pet.update(mode: .idle, skin: skin, runningCount: 0, unreadCount: 0)
             statusItem.button?.title = "🐾"
             return
         }
@@ -1150,7 +1610,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         lastUnread = Array(unread)
 
         let m = currentMode()
-        pet.update(mode: m, emoji: skin.emoji(for: m), runningCount: running.count, unreadCount: unread.count)
+        pet.update(mode: m, skin: skin, runningCount: running.count, unreadCount: unread.count)
         let base = running.isEmpty ? "🐾" : "🐾 \(running.count)"
         statusItem.button?.title = unread.isEmpty ? base : "\(base) 📬\(unread.count)"
         rebuildMenu(running: running, unread: lastUnread)
@@ -1197,14 +1657,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // 宠物造型子菜单
         let skinMenu = NSMenu(title: "宠物造型")
         for s in petSkins {
-            let item = NSMenuItem(title: "\(s.idle)  \(s.name)",
+            let item = NSMenuItem(title: "\(s.glyph)  \(s.name)",
                                   action: #selector(selectSkin(_:)), keyEquivalent: "")
             item.target = self
             item.representedObject = s.id
             item.state = (s.id == skin.id) ? .on : .off
             skinMenu.addItem(item)
         }
-        let skinItem = menu.addItem(withTitle: "宠物造型 \(skin.idle)", action: nil, keyEquivalent: "")
+        let skinItem = menu.addItem(withTitle: "宠物造型 \(skin.glyph)", action: nil, keyEquivalent: "")
         skinItem.submenu = skinMenu
 
         if let last = eventTail?.stopHookLastAt, last > 0 {
@@ -1440,6 +1900,11 @@ if let i = CommandLine.arguments.firstIndex(of: "--gen-icon"), CommandLine.argum
     let ok = AppIconManager.generate(emoji: CommandLine.arguments[i + 1], to: dest)
     print(ok ? "icon ok: \(dest.path)" : "icon generate failed")
     exit(ok ? 0 : 1)
+}
+
+// --render-art <dir>：导出全部手绘皮肤的 4 种状态 + 图标效果 PNG（画得对不对肉眼自检）
+if let i = CommandLine.arguments.firstIndex(of: "--render-art"), CommandLine.arguments.count > i + 1 {
+    exit(PetArt.exportAll(to: CommandLine.arguments[i + 1]))
 }
 
 if CommandLine.arguments.contains("--notify-test") {
