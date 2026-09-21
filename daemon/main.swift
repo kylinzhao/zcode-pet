@@ -12,6 +12,11 @@
 //     （每次点完成任务都弹，非信任问题）；改 spawn ZCode 二进制 --open-workspace 参数，全程无弹窗。
 // v0.4.1 通知图标：横幅图标 = bundle 图标；AppIconManager 渲染 emoji icns 写回 bundle 并重签名，
 //     图标跟随宠物皮肤（切换造型即换图标）；install.sh 默认 🐾，启动后对账成当前皮肤。
+// v0.5 点击改造（fixes #2）：ZCode 无任务级外部入口（深链只解析 path、单实例转发只认
+//     deepLinkUrl/openWorkspacePath 两种意图、无本地端口、AX 树不暴露 Web 内容——3.14.0
+//     app.asar 实证），--open-workspace 只能落在工作区的新任务上。改为点击通知/菜单直接弹
+//     宠物自己的「任务结果」面板（标题/状态/最后一条助手消息，读 cli db 的 message+part 表），
+//     面板内保留「在 ZCode 中打开」按钮；宠物本体点击改纯 activate（不再隐式开工作区）。
 //
 // 构建：bash scripts/install.sh（编译进 .app bundle + ad-hoc 签名）；自检：--test。
 
@@ -25,6 +30,7 @@ private let SQLITE_TRANSIENT = unsafeBitCast(-1, to: sqlite3_destructor_type.sel
 
 struct PetConfig {
     var dbPath: String
+    var resultDbPath: String             // cli 消息库（任务结果面板取最后一条助手消息）
     var pollInterval: TimeInterval
     var notifyCooldown: TimeInterval      // 同一 sessionId 完成事件的去重窗口（双路径触发用）
     var allClearMinSeconds: TimeInterval  // 归零弹窗只对跑过这么久的任务触发
@@ -37,6 +43,7 @@ struct PetConfig {
     static func load() -> PetConfig {
         var c = PetConfig(
             dbPath: NSHomeDirectory() + "/.zcode/v2/tasks-index.sqlite",
+            resultDbPath: NSHomeDirectory() + "/.zcode/cli/db/db.sqlite",
             pollInterval: 2.0,
             notifyCooldown: 10.0,
             allClearMinSeconds: 120.0,
@@ -48,6 +55,7 @@ struct PetConfig {
         guard let data = try? Data(contentsOf: url),
               let obj = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any] else { return c }
         if let v = obj["dbPath"] as? String { c.dbPath = v }
+        if let v = obj["resultDbPath"] as? String { c.resultDbPath = v }
         if let v = obj["pollInterval"] as? Double, v >= 0.5 { c.pollInterval = v }
         if let v = obj["notifyCooldown"] as? Double { c.notifyCooldown = v }
         if let v = obj["allClearMinSeconds"] as? Double { c.allClearMinSeconds = v }
@@ -99,6 +107,69 @@ final class TaskStore {
         }
         var seen = Set<String>()
         return out.filter { seen.insert($0.id).inserted }
+    }
+}
+
+// MARK: - Task result store（cli 消息库：会话最后一条助手消息）
+
+/// 读 ~/.zcode/cli/db/db.sqlite 的 message+part 表。task_id 即 session_id。
+/// 选文策略：从新到旧逐条 assistant 消息看；每条里优先取非工具回显的 text part
+/// （同条多个取最后一个），整条没有就用它的 reasoning part（最后一步常是工具调用，
+/// 总结只在 reasoning 里）；都空才退到更早的助手消息。
+final class TaskResultStore {
+    private var db: OpaquePointer?
+
+    init?(path: String) {
+        var handle: OpaquePointer?
+        guard sqlite3_open_v2(path, &handle, SQLITE_OPEN_READONLY, nil) == SQLITE_OK, let h = handle else {
+            return nil
+        }
+        db = h
+    }
+    deinit { if let db { sqlite3_close(db) } }
+
+    private func query(_ sql: String, _ bind: (OpaquePointer) -> Void = { _ in }) -> [[String: String]] {
+        guard let db else { return [] }
+        var stmt: OpaquePointer?
+        guard sqlite3_prepare_v2(db, sql, -1, &stmt, nil) == SQLITE_OK, let stmt else { return [] }
+        defer { sqlite3_finalize(stmt) }
+        bind(stmt)
+        var rows: [[String: String]] = []
+        while sqlite3_step(stmt) == SQLITE_ROW {
+            let c = { (n: Int32) in sqlite3_column_text(stmt, n).map { String(cString: $0) } ?? "" }
+            rows.append(["id": c(0), "data": c(1)])
+        }
+        return rows
+    }
+
+    func lastAssistantText(sessionId: String) -> String? {
+        // 最近 6 条 assistant 消息（时间倒序）
+        let messages = query("""
+        SELECT id, data FROM message WHERE session_id = ?1
+        AND instr(data, '"role":"assistant"') > 0
+        ORDER BY time_created DESC, sequence DESC LIMIT 6
+        """) { sqlite3_bind_text($0, 1, sessionId, -1, SQLITE_TRANSIENT) }
+
+        for msg in messages {
+            var textHit: String?, reasoningHit: String?
+            var stmt: OpaquePointer?
+            let sql = "SELECT data FROM part WHERE message_id = ?1 ORDER BY sequence"
+            guard let db, sqlite3_prepare_v2(db, sql, -1, &stmt, nil) == SQLITE_OK, let stmt else { continue }
+            defer { sqlite3_finalize(stmt) }
+            sqlite3_bind_text(stmt, 1, msg["id"] ?? "", -1, SQLITE_TRANSIENT)
+            while sqlite3_step(stmt) == SQLITE_ROW {
+                let partData = sqlite3_column_text(stmt, 0).map { String(cString: $0) } ?? ""
+                guard let obj = (try? JSONSerialization.jsonObject(with: Data(partData.utf8))) as? [String: Any],
+                      let type = obj["type"] as? String else { continue }
+                let text = (obj["text"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+                if text.isEmpty { continue }
+                if type == "text", !text.hasPrefix("**🌐") { textHit = text }
+                if type == "reasoning" { reasoningHit = text }
+            }
+            if let textHit { return textHit }
+            if let reasoningHit { return reasoningHit }
+        }
+        return nil
     }
 }
 
@@ -336,6 +407,118 @@ final class PetAlertController {
     enum Kind { case error, allClear }
 }
 
+// MARK: - 任务结果面板（点击完成/出错任务 → 就地看结果，不再隐式开 ZCode 新任务）
+
+final class TaskResultPanelController {
+    static let shared = TaskResultPanelController()
+    private var panel: NSPanel?
+    private var titleField: NSTextField!
+    private var metaField: NSTextField!
+    private var emojiField: NSTextField!
+    private var textView: NSTextView!
+    private var openButton: NSButton!
+    private var workspacePath: String?
+
+    func show(title: String, isError: Bool, meta: String, body: String, workspacePath ws: String?) {
+        if !Thread.isMainThread {
+            DispatchQueue.main.async { self.show(title: title, isError: isError, meta: meta, body: body, workspacePath: ws) }
+            return
+        }
+        panel?.orderOut(nil)
+        workspacePath = ws
+
+        let W: CGFloat = 640, H: CGFloat = 580
+        // 直接按目标尺寸创建（.zero+setContentSize 会让窗口保持 0x0——实测坑）
+        let p = NSPanel(contentRect: NSRect(x: 0, y: 0, width: W, height: H),
+                        styleMask: [.borderless, .nonactivatingPanel], backing: .buffered, defer: false)
+        p.level = .floating
+        p.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary]
+        p.isOpaque = false
+        p.backgroundColor = .clear
+
+        let container = NSView(frame: NSRect(x: 0, y: 0, width: W, height: H))
+        container.wantsLayer = true
+        container.layer?.cornerRadius = 18
+        container.layer?.backgroundColor = NSColor(white: 0.12, alpha: 0.97).cgColor
+        container.layer?.borderWidth = 2
+        container.layer?.borderColor = (isError ? NSColor.systemRed : NSColor.systemGreen).withAlphaComponent(0.85).cgColor
+
+        emojiField = NSTextField(labelWithString: isError ? "⚠️" : "🎉")
+        emojiField.font = .systemFont(ofSize: 34)
+        emojiField.alignment = .center
+        emojiField.frame = NSRect(x: 16, y: H - 62, width: 56, height: 48)
+
+        titleField = NSTextField(labelWithString: title)
+        titleField.font = .boldSystemFont(ofSize: 16)
+        titleField.textColor = isError ? NSColor.systemRed : NSColor.systemGreen
+        titleField.lineBreakMode = .byTruncatingTail
+        titleField.maximumNumberOfLines = 1
+        titleField.frame = NSRect(x: 80, y: H - 42, width: W - 100, height: 22)
+
+        metaField = NSTextField(labelWithString: meta)
+        metaField.font = .systemFont(ofSize: 12)
+        metaField.textColor = NSColor(white: 1.0, alpha: 0.65)
+        metaField.lineBreakMode = .byTruncatingTail
+        metaField.frame = NSRect(x: 80, y: H - 62, width: W - 100, height: 18)
+
+        let scroll = NSScrollView(frame: NSRect(x: 20, y: 66, width: W - 40, height: H - 110))
+        scroll.hasVerticalScroller = true
+        scroll.autohidesScrollers = true
+        scroll.drawsBackground = false
+        scroll.wantsLayer = true
+        scroll.layer?.cornerRadius = 10
+        scroll.layer?.backgroundColor = NSColor(white: 0.06, alpha: 0.6).cgColor
+        let tv = NSTextView(frame: scroll.bounds)
+        tv.isEditable = false
+        tv.isSelectable = true
+        tv.isRichText = false
+        tv.drawsBackground = false
+        tv.textContainerInset = NSSize(width: 12, height: 10)
+        tv.font = .systemFont(ofSize: 13)
+        tv.textColor = NSColor(white: 1.0, alpha: 0.92)
+        tv.string = body.isEmpty ? "（这条会话没有可显示的文本结果——点下方按钮去 ZCode 里看）" : body
+        scroll.documentView = tv
+        textView = tv
+
+        let close = NSButton(title: "关闭", target: self, action: #selector(dismiss))
+        close.bezelStyle = .rounded
+        close.keyEquivalent = "\r"
+        close.frame = NSRect(x: W - 210, y: 18, width: 90, height: 32)
+        openButton = NSButton(title: "在 ZCode 中打开", target: self, action: #selector(openInZCode))
+        openButton.bezelStyle = .rounded
+        openButton.keyEquivalent = "\r"
+        openButton.frame = NSRect(x: W - 112, y: 18, width: 92, height: 32)
+
+        container.addSubview(emojiField)
+        container.addSubview(titleField)
+        container.addSubview(metaField)
+        container.addSubview(scroll)
+        container.addSubview(close)
+        container.addSubview(openButton)
+        p.contentView = container
+        p.setContentSize(container.bounds.size)
+
+        if let screen = NSScreen.main {
+            let vf = screen.visibleFrame
+            p.setFrameOrigin(NSPoint(x: vf.midX - W / 2, y: vf.midY - 80))
+        }
+        p.orderFrontRegardless()
+        panel = p
+    }
+
+    @objc private func dismiss() { panel?.orderOut(nil); panel = nil }
+
+    @objc private func openInZCode() {
+        let delegate = AppDelegate.shared
+        if let ws = workspacePath, !ws.isEmpty {
+            delegate?.jumpToZCode(workspacePath: ws)
+        } else {
+            delegate?.jumpToZCode(workspacePath: nil)
+        }
+        dismiss()
+    }
+}
+
 // MARK: - Pet panel（悬浮宠物：点击回 ZCode，拖动移动且位置记忆）
 
 final class PetPanelController {
@@ -536,9 +719,12 @@ final class EventTail {
 // MARK: - App delegate
 
 final class AppDelegate: NSObject, NSApplicationDelegate {
+    static weak var shared: AppDelegate?
+
     let config = PetConfig.load()
     var state = PetState.load()
     let store: TaskStore?
+    let resultStore: TaskResultStore?
     var skin: PetSkin = currentSkin()
 
     private var statusItem: NSStatusItem!
@@ -552,6 +738,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var pendingChecks: [String: Double] = [:]
     // DB 快照
     private var prevRows: [String: TaskRow] = [:]
+    // taskId → 最新行（菜单/通知点击时还原标题、状态、工作区）
+    private var rowsById: [String: TaskRow] = [:]
     // UI 缓存
     private var lastRunning: [(title: String, id: String, ws: String)] = []
     private var lastUnread: [TaskRow] = []
@@ -562,8 +750,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var lastStateSave = 0.0
 
     override init() {
-        store = TaskStore(path: PetConfig.load().dbPath)
+        let cfg = PetConfig.load()
+        store = TaskStore(path: cfg.dbPath)
+        resultStore = TaskResultStore(path: cfg.resultDbPath)
         super.init()
+        AppDelegate.shared = self
     }
 
     func applicationDidFinishLaunching(_ notification: Notification) {
@@ -780,7 +971,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         PetAlertController.shared.show(kind: kind, title: title, body: body)
     }
 
-    /// 跳回 ZCode：优先 --open-workspace 命令行直达工作区，否则仅激活应用。
+    /// 跳回 ZCode：带工作区时走 --open-workspace（会落在该工作区的新任务上，ZCode 无任务级
+        /// 外部入口——故只作为结果面板里用户主动点的按钮）；不带时纯 activate，绝不新建任务。
     /// 不用 zcode://workspace/open 深链——主进程对深链无条件弹「是否在 ZCode 中打开此文件夹？」
     /// 确认框（confirmExternalWorkspaceOpen，无信任列表/绕过参数，3.14.0 实测源码）；
     /// 而 --open-workspace 两条路径都不弹窗：冷启动作为启动参数（open-workspace-arg 源免确认），
@@ -832,6 +1024,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     private func updateUI(displayIds: Set<String>, byId: [String: TaskRow]) {
+        rowsById = byId
         let unread = byId.values
             .filter { ($0.status == "completed" || $0.status == "error") && $0.unreadAtMs > 0 }
             .sorted { $0.unreadAtMs > $1.unreadAtMs }
@@ -855,24 +1048,24 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         if running.isEmpty {
             menu.addItem(withTitle: "没有执行中的任务", action: nil, keyEquivalent: "")
         } else {
-            menu.addItem(withTitle: "执行中（\(running.count)）— 点击跳转", action: nil, keyEquivalent: "")
+            menu.addItem(withTitle: "执行中（\(running.count)）— 点击看进度", action: nil, keyEquivalent: "")
             for t in running.prefix(8) {
                 let item = menu.addItem(withTitle: "  " + t.title,
-                                        action: #selector(openUnreadTask(_:)), keyEquivalent: "")
+                                        action: #selector(openTaskResult(_:)), keyEquivalent: "")
                 item.target = self
-                item.representedObject = t.ws.isEmpty ? nil : t.ws
+                item.representedObject = t.id.isEmpty ? nil : t.id
             }
         }
         menu.addItem(.separator())
 
         if !unread.isEmpty {
-            menu.addItem(withTitle: "完成未读（\(unread.count)）— 点击跳转", action: nil, keyEquivalent: "")
+            menu.addItem(withTitle: "完成未读（\(unread.count)）— 点击看结果", action: nil, keyEquivalent: "")
             for t in unread.prefix(10) {
                 let prefix = t.status == "error" ? "⚠️ " : "✅ "
                 let item = menu.addItem(withTitle: "  " + prefix + shortTitle(t.title),
-                                        action: #selector(openUnreadTask(_:)), keyEquivalent: "")
+                                        action: #selector(openTaskResult(_:)), keyEquivalent: "")
                 item.target = self
-                item.representedObject = t.workspacePath.isEmpty ? nil : t.workspacePath
+                item.representedObject = t.id
             }
             menu.addItem(.separator())
         }
@@ -927,8 +1120,35 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
     }
 
-    @objc private func openUnreadTask(_ sender: NSMenuItem) {
-        jumpToZCode(workspacePath: sender.representedObject as? String)
+    @objc private func openTaskResult(_ sender: NSMenuItem) {
+        guard let id = sender.representedObject as? String else { return }
+        showResultPanel(taskId: id)
+    }
+
+    /// 任务结果面板：标题/状态/完成时间来自 tasks-index 快照，正文来自 cli 消息库。
+    /// ZCode 没有任务级外部入口（v0.5 调研结论），所以点击就地看结果，不再隐式开工作区。
+    func showResultPanel(taskId: String, fallbackTitle: String? = nil, isError: Bool? = nil) {
+        let row = rowsById[taskId] ?? store?.allTasks().first { $0.id == taskId }
+        let title = shortTitle(row?.title.isEmpty == false ? row!.title : (fallbackTitle ?? "任务"), 40)
+        let error = isError ?? (row?.status == "error")
+        let running = row?.status == "running"
+
+        var metaParts: [String] = []
+        if let ws = row?.workspacePath, !ws.isEmpty {
+            metaParts.append((ws as NSString).lastPathComponent)
+        }
+        if running { metaParts.append("执行中") }
+        if let updatedMs = row?.updatedAtMs, updatedMs > 0, !running {
+            let date = Date(timeIntervalSince1970: updatedMs / 1000)
+            let fmt = DateFormatter()
+            fmt.dateFormat = "HH:mm"
+            metaParts.append(error ? "出错于 \(fmt.string(from: date))" : "完成于 \(fmt.string(from: date))")
+        }
+        let body = resultStore?.lastAssistantText(sessionId: taskId) ?? ""
+        TaskResultPanelController.shared.show(
+            title: title, isError: error,
+            meta: metaParts.joined(separator: " · "),
+            body: body, workspacePath: row?.workspacePath)
     }
 
     /// 验证图标/声音/点击跳转链路是否正常
@@ -961,15 +1181,24 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 }
 
-// MARK: - UN 通知回调：点击跳回任务工作区
+// MARK: - UN 通知回调：点击 → 任务结果面板（ZCode 无任务级入口，就地看结果）
 
 extension AppDelegate: UNUserNotificationCenterDelegate {
     func userNotificationCenter(_ center: UNUserNotificationCenter,
                                 didReceive response: UNNotificationResponse,
                                 withCompletionHandler completionHandler: @escaping () -> Void) {
         let info = response.notification.request.content.userInfo
-        let ws = info["workspacePath"] as? String
-        jumpToZCode(workspacePath: (ws?.isEmpty ?? true) ? nil : ws)
+        let taskId = info["taskId"] as? String
+        if let taskId, taskId != "test" {
+            showResultPanel(taskId: taskId,
+                            fallbackTitle: info["title"] as? String,
+                            isError: (info["title"] as? String)?.contains("出错") ?? false)
+        } else {
+            // 测试通知：直接弹面板走一遍 UI 链路
+            TaskResultPanelController.shared.show(title: "测试通知", isError: false,
+                                                  meta: "链路自检", body: "看到这个面板说明点击链路正常。",
+                                                  workspacePath: info["workspacePath"] as? String)
+        }
         completionHandler()
     }
 
@@ -1036,6 +1265,29 @@ final class NotifyTestDelegate: NSObject, NSApplicationDelegate {
     }
 }
 
+// MARK: - --panel-test <taskId>（用真实库数据拉起任务结果面板，20 秒自动退出）
+
+var panelTestTaskId: String?
+
+final class PanelTestDelegate: NSObject, NSApplicationDelegate {
+    func applicationDidFinishLaunching(_ notification: Notification) {
+        guard let taskId = panelTestTaskId else { NSApp.terminate(nil); return }
+        let cfg = PetConfig.load()
+        let store = TaskStore(path: cfg.dbPath)
+        let resultStore = TaskResultStore(path: cfg.resultDbPath)
+        let row = store?.allTasks().first { $0.id == taskId }
+        let body = resultStore?.lastAssistantText(sessionId: taskId) ?? ""
+        var meta: [String] = []
+        if let ws = row?.workspacePath, !ws.isEmpty { meta.append((ws as NSString).lastPathComponent) }
+        meta.append(row?.status ?? "unknown")
+        TaskResultPanelController.shared.show(title: shortTitle(row?.title ?? taskId, 40),
+                                              isError: row?.status == "error",
+                                              meta: meta.joined(separator: " · "),
+                                              body: body, workspacePath: row?.workspacePath)
+        Timer.scheduledTimer(withTimeInterval: 20, repeats: false) { _ in NSApp.terminate(nil) }
+    }
+}
+
 // MARK: - main
 
 if CommandLine.arguments.contains("--test") {
@@ -1053,6 +1305,18 @@ if let i = CommandLine.arguments.firstIndex(of: "--gen-icon"), CommandLine.argum
 if CommandLine.arguments.contains("--notify-test") {
     let app = NSApplication.shared
     let delegate = NotifyTestDelegate()   // NSApplication.delegate 是 weak，需强引用
+    app.delegate = delegate
+    app.setActivationPolicy(.accessory)
+    app.run()
+}
+
+// --panel-test <taskId>：用真实库数据拉起任务结果面板（无轮询、20 秒自动退出，链路自检用）
+if let i = CommandLine.arguments.firstIndex(of: "--panel-test"), CommandLine.arguments.count > i + 1 {
+    panelTestTaskId = CommandLine.arguments[i + 1]
+}
+if CommandLine.arguments.contains("--panel-test") {
+    let app = NSApplication.shared
+    let delegate = PanelTestDelegate()
     app.delegate = delegate
     app.setActivationPolicy(.accessory)
     app.run()
