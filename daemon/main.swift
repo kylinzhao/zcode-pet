@@ -530,7 +530,7 @@ final class PetPanelController {
     private var dragging = false
     private var onDragEndHandler: ((NSPoint) -> Void)?
 
-    static let size = NSSize(width: 148, height: 158)
+    static let size = NSSize(width: 104, height: 110)   // v0.5.2 缩小 30%（原 148×158）
 
     init(savedOrigin: NSPoint?, onClick: @escaping () -> Void, onDragEnd: @escaping (NSPoint) -> Void) {
         onDragEndHandler = onDragEnd
@@ -553,20 +553,20 @@ final class PetPanelController {
             onDragEnd(self.baseOrigin)
         }
         container.wantsLayer = true
-        container.layer?.cornerRadius = 26
+        container.layer?.cornerRadius = 18
         container.layer?.backgroundColor = NSColor(white: 0.10, alpha: 0.72).cgColor
 
         emojiField = NSTextField(labelWithString: "😺")
-        emojiField.font = .systemFont(ofSize: 60)
+        emojiField.font = .systemFont(ofSize: 42)
         emojiField.alignment = .center
-        emojiField.frame = NSRect(x: 4, y: 62, width: 140, height: 82)
+        emojiField.frame = NSRect(x: 3, y: 44, width: 98, height: 58)
 
         captionField = NSTextField(labelWithString: "启动中…")
-        captionField.font = .systemFont(ofSize: 12.5)
+        captionField.font = .systemFont(ofSize: 11)
         captionField.textColor = NSColor(white: 1.0, alpha: 0.92)
         captionField.alignment = .center
         captionField.lineBreakMode = .byTruncatingTail
-        captionField.frame = NSRect(x: 10, y: 28, width: 128, height: 30)
+        captionField.frame = NSRect(x: 7, y: 20, width: 90, height: 22)
 
         container.addSubview(emojiField)
         container.addSubview(captionField)
