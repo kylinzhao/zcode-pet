@@ -1009,11 +1009,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 return   // 已运行的 ZCode 会通过单实例锁把参数转给主进程，本进程随即自行退出
             }
         }
-        if let app = NSWorkspace.shared.runningApplications.first(where: { $0.bundleIdentifier == config.zcodeAppBundleId && $0.activationPolicy == .regular }) {
-            app.activate()
-        } else {
-            NSWorkspace.shared.open(URL(fileURLWithPath: "/Applications/ZCode.app"))
-        }
+        // activate() 从后台进程调用时对最小化窗口无效（实测返回 true 但窗口不动）；
+        // open app URL 等价 Dock 点击（reopen 事件），ZCode 端会恢复并聚焦主窗口
+        let appURL = NSWorkspace.shared.urlForApplication(withBundleIdentifier: config.zcodeAppBundleId)
+            ?? URL(fileURLWithPath: "/Applications/ZCode.app")
+        NSWorkspace.shared.open(appURL)
     }
 
     /// 定位 ZCode 可执行文件：运行中实例的 bundle → 按 bundle id 全局解析 → /Applications 兜底
