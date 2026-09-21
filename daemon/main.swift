@@ -10,6 +10,8 @@
 // v0.2：点宠物回 ZCode；菜单栏 📬M 未读；UN 可点击通知 → --open-workspace 直达工作区。
 // v0.4 跳转修正：zcode://workspace/open 深链会被 ZCode 无条件弹「打开外部链接」确认框
 //     （每次点完成任务都弹，非信任问题）；改 spawn ZCode 二进制 --open-workspace 参数，全程无弹窗。
+// v0.4.1 通知图标：横幅图标 = bundle 图标；AppIconManager 渲染 emoji icns 写回 bundle 并重签名，
+//     图标跟随宠物皮肤（切换造型即换图标）；install.sh 默认 🐾，启动后对账成当前皮肤。
 //
 // 构建：bash scripts/install.sh（编译进 .app bundle + ad-hoc 签名）；自检：--test。
 
@@ -178,6 +180,84 @@ let petSkins: [PetSkin] = [
 func currentSkin() -> PetSkin {
     let id = PetState.load().skinId
     return petSkins.first { $0.id == id } ?? petSkins[0]
+}
+
+// MARK: - App 图标（跟随宠物皮肤）
+//
+// 通知横幅图标 = App bundle 图标。切换皮肤时把新 emoji 渲染成 icns 写回自己的 bundle，
+// 重新 ad-hoc 签名（改 Resources 会破坏原签名），再刷 usernoted 的图标缓存。
+// Resources/AppIcon.skin 记录当前 icns 是哪个皮肤，启动时据此跳过无谓的重打。
+
+enum AppIconManager {
+    private static let queue = DispatchQueue(label: "dev.zcode.pet.icon", qos: .utility)
+    private static let sizes = [16, 32, 128, 256, 512]
+
+    /// 异步把 bundle 图标换成指定皮肤（已是该皮肤则跳过）
+    static func apply(skin: PetSkin) {
+        queue.async {
+            let bundle = Bundle.main
+            guard bundle.bundleIdentifier == "dev.zcode.pet", let res = bundle.resourceURL else { return }
+            let marker = res.appendingPathComponent("AppIcon.skin")
+            let current = (try? String(contentsOf: marker, encoding: .utf8))?
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+            guard current != skin.id else { return }
+            guard generate(emoji: skin.idle, to: res.appendingPathComponent("AppIcon.icns")) else { return }
+            try? skin.id.write(to: marker, atomically: true, encoding: .utf8)
+            _ = run("/usr/bin/codesign", ["--force", "-s", "-", bundle.bundlePath])
+            _ = run("/usr/bin/killall", ["usernoted"])   // 通知横幅的图标缓存
+            NSLog("[zcode-pet] app icon swapped to skin \(skin.id)")
+        }
+    }
+
+    /// emoji → 全尺寸 iconset → iconutil 打包 icns（--gen-icon 命令行也走这里）
+    static func generate(emoji: String, to dest: URL) -> Bool {
+        let tmp = FileManager.default.temporaryDirectory
+            .appendingPathComponent("pet-icon-\(UUID().uuidString)", isDirectory: true)
+        let iconset = tmp.appendingPathComponent("AppIcon.iconset", isDirectory: true)
+        do { try FileManager.default.createDirectory(at: iconset, withIntermediateDirectories: true) } catch { return false }
+        defer { try? FileManager.default.removeItem(at: tmp) }
+        for s in sizes {
+            guard writePNG(emoji: emoji, pixels: s, to: iconset.appendingPathComponent("icon_\(s)x\(s).png")),
+                  writePNG(emoji: emoji, pixels: s * 2, to: iconset.appendingPathComponent("icon_\(s)x\(s)@2x.png"))
+            else { return false }
+        }
+        return run("/usr/bin/iconutil", ["-c", "icns", iconset.path, "-o", dest.path]) == 0
+    }
+
+    private static func writePNG(emoji: String, pixels: Int, to url: URL) -> Bool {
+        let size = CGFloat(pixels)
+        guard let rep = NSBitmapImageRep(bitmapDataPlanes: nil, pixelsWide: pixels, pixelsHigh: pixels,
+                                         bitsPerSample: 8, samplesPerPixel: 4, hasAlpha: true, isPlanar: false,
+                                         colorSpaceName: .deviceRGB, bytesPerRow: 0, bitsPerPixel: 0) else { return false }
+        rep.size = NSSize(width: size, height: size)
+        NSGraphicsContext.saveGraphicsState()
+        NSGraphicsContext.current = NSGraphicsContext(bitmapImageRep: rep)
+        defer { NSGraphicsContext.restoreGraphicsState() }
+        guard let ctx = NSGraphicsContext.current?.cgContext else { return false }
+        // 圆角底 + 暖色渐变（各皮肤共用同一配方，只有 emoji 变）
+        NSBezierPath(roundedRect: CGRect(origin: .zero, size: CGSize(width: size, height: size)),
+                     xRadius: size * 0.22, yRadius: size * 0.22).addClip()
+        let colors = [NSColor(srgbRed: 1.00, green: 0.80, blue: 0.48, alpha: 1).cgColor,
+                      NSColor(srgbRed: 0.95, green: 0.55, blue: 0.18, alpha: 1).cgColor] as CFArray
+        if let grad = CGGradient(colorsSpace: CGColorSpace(name: CGColorSpace.sRGB), colors: colors, locations: [0, 1]) {
+            ctx.drawLinearGradient(grad, start: CGPoint(x: 0, y: size), end: CGPoint(x: 0, y: 0), options: [])
+        }
+        let str = NSAttributedString(string: emoji, attributes: [.font: NSFont.systemFont(ofSize: size * 0.62)])
+        let b = str.boundingRect(with: NSSize(width: size, height: size), options: [.usesLineFragmentOrigin])
+        str.draw(at: NSPoint(x: (size - b.width) / 2 - b.origin.x, y: (size - b.height) / 2 - b.origin.y))
+        guard let png = rep.representation(using: .png, properties: [:]) else { return false }
+        do { try png.write(to: url); return true } catch { return false }
+    }
+
+    @discardableResult
+    private static func run(_ exe: String, _ args: [String]) -> Int32? {
+        let p = Process()
+        p.executableURL = URL(fileURLWithPath: exe)
+        p.arguments = args
+        p.standardOutput = FileHandle.nullDevice
+        p.standardError = FileHandle.nullDevice
+        do { try p.run(); p.waitUntilExit(); return p.terminationStatus } catch { return nil }
+    }
 }
 
 func now() -> Double { Date().timeIntervalSince1970 }
@@ -498,6 +578,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
         statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
         statusItem.button?.title = "🐾"
+
+        // 安装脚本写的是 🐾 默认图标，启动时换成当前皮肤（marker 命中则秒过）
+        AppIconManager.apply(skin: skin)
 
         rebuildMenu(running: [], unread: [])
 
@@ -836,6 +919,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         skin = s
         state.skinId = id
         state.save()
+        AppIconManager.apply(skin: s)
         if let store {
             let rows = store.allTasks()
             let byId = Dictionary(uniqueKeysWithValues: rows.map { ($0.id, $0) })
@@ -956,6 +1040,14 @@ final class NotifyTestDelegate: NSObject, NSApplicationDelegate {
 
 if CommandLine.arguments.contains("--test") {
     exit(runSelfTest())
+}
+
+// --gen-icon <emoji> <out.icns>：给 install.sh 生成默认 🐾 图标（无 GUI，渲染完即退）
+if let i = CommandLine.arguments.firstIndex(of: "--gen-icon"), CommandLine.arguments.count > i + 2 {
+    let dest = URL(fileURLWithPath: CommandLine.arguments[i + 2])
+    let ok = AppIconManager.generate(emoji: CommandLine.arguments[i + 1], to: dest)
+    print(ok ? "icon ok: \(dest.path)" : "icon generate failed")
+    exit(ok ? 0 : 1)
 }
 
 if CommandLine.arguments.contains("--notify-test") {
