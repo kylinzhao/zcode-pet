@@ -17,6 +17,9 @@
 //     app.asar 实证），--open-workspace 只能落在工作区的新任务上。改为点击通知/菜单直接弹
 //     宠物自己的「任务结果」面板（标题/状态/最后一条助手消息，读 cli db 的 message+part 表），
 //     面板内保留「在 ZCode 中打开」按钮；宠物本体点击改纯 activate（不再隐式开工作区）。
+// v0.5.3 最小化唤起：activate() 后台调用不恢复最小化窗口，改 open app URL（=Dock 点击）。
+// v0.6 宠物点击改任务清单：点宠物在旁边弹 popover 列出执行中/完成未读任务；
+//     点执行中项 → --open-workspace 跳该任务的工作区窗口；点未读项 → 任务结果面板。
 //
 // 构建：bash scripts/install.sh（编译进 .app bundle + ad-hoc 签名）；自检：--test。
 
@@ -519,6 +522,94 @@ final class TaskResultPanelController {
     }
 }
 
+// MARK: - 任务清单 popover（点宠物 → 旁边列出执行中/完成未读，点条目跳转）
+
+final class TaskListPopover {
+    static let shared = TaskListPopover()
+    private let popover = NSPopover()
+
+    /// 在锚点旁弹出/关闭。行按钮 target/action 交回 AppDelegate，
+    /// identifier 约定 "run|<taskId>" / "unread|<taskId>"。
+    func toggle(anchor: NSView,
+                running: [(title: String, id: String, ws: String)],
+                unread: [TaskRow],
+                target: AnyObject, action: Selector) {
+        if popover.isShown { popover.performClose(nil); return }
+        popover.appearance = NSAppearance(named: .vibrantDark)
+        popover.behavior = .transient   // 点外部自动关
+        let vc = NSViewController()
+        vc.view = buildView(running: running, unread: unread, target: target, action: action)
+        popover.contentViewController = vc
+        popover.contentSize = vc.view.frame.size
+
+        // 宠物常贴屏幕右缘：右边放不下就往左弹
+        var edge: NSRectEdge = .maxX
+        if let win = anchor.window, let vf = win.screen?.visibleFrame {
+            if win.frame.maxX + 340 > vf.maxX { edge = .minX }
+        }
+        popover.show(relativeTo: anchor.bounds, of: anchor, preferredEdge: edge)
+    }
+
+    func close() { popover.performClose(nil) }
+
+    private func buildView(running: [(title: String, id: String, ws: String)],
+                           unread: [TaskRow],
+                           target: AnyObject, action: Selector) -> NSView {
+        let W: CGFloat = 320, rowH: CGFloat = 30, headerH: CGFloat = 22
+        let runRows = running.prefix(8)
+        let unreadRows = unread.prefix(10)
+
+        var H: CGFloat = 16
+        if runRows.isEmpty && unreadRows.isEmpty { H += 34 }
+        if !runRows.isEmpty { H += headerH + CGFloat(runRows.count) * rowH + 6 }
+        if !unreadRows.isEmpty { H += headerH + CGFloat(unreadRows.count) * rowH + 6 }
+        H += 10
+        let view = NSView(frame: NSRect(x: 0, y: 0, width: W, height: H))
+        var y = H - 14   // AppKit 原点在左下，从顶部往下摆
+
+        func addHeader(_ text: String) {
+            let l = NSTextField(labelWithString: text)
+            l.font = .boldSystemFont(ofSize: 11)
+            l.textColor = .secondaryLabelColor
+            l.frame = NSRect(x: 14, y: y - headerH + 3, width: W - 28, height: headerH)
+            view.addSubview(l)
+            y -= headerH + 2
+        }
+        func addRow(_ emoji: String, _ title: String, _ key: String) {
+            let b = NSButton(title: "\(emoji)  \(title)", target: target, action: action)
+            b.isBordered = false
+            b.font = .systemFont(ofSize: 12.5)
+            b.alignment = .left
+            b.lineBreakMode = .byTruncatingTail
+            b.identifier = NSUserInterfaceItemIdentifier(key)
+            b.frame = NSRect(x: 12, y: y - rowH + 2, width: W - 24, height: rowH)
+            view.addSubview(b)
+            y -= rowH
+        }
+
+        if runRows.isEmpty && unreadRows.isEmpty {
+            let l = NSTextField(labelWithString: "没有执行中的任务")
+            l.font = .systemFont(ofSize: 12.5)
+            l.textColor = .secondaryLabelColor
+            l.frame = NSRect(x: 14, y: y - 30, width: W - 28, height: 22)
+            view.addSubview(l)
+            return view
+        }
+        if !runRows.isEmpty {
+            addHeader("执行中（\(runRows.count)）")
+            for t in runRows { addRow("🔄", t.title, "run|\(t.id)") }
+            y -= 8
+        }
+        if !unreadRows.isEmpty {
+            addHeader("完成未读（\(unreadRows.count)）")
+            for t in unreadRows {
+                addRow(t.status == "error" ? "⚠️" : "✅", shortTitle(t.title), "unread|\(t.id)")
+            }
+        }
+        return view
+    }
+}
+
 // MARK: - Pet panel（悬浮宠物：点击回 ZCode，拖动移动且位置记忆）
 
 final class PetPanelController {
@@ -529,6 +620,7 @@ final class PetPanelController {
     private var phase: Double = 0
     private var dragging = false
     private var onDragEndHandler: ((NSPoint) -> Void)?
+    private(set) var containerView: NSView!   // popover 锚点（v0.6 任务清单）
 
     static let size = NSSize(width: 104, height: 110)   // v0.5.2 缩小 30%（原 148×158）
 
@@ -543,6 +635,7 @@ final class PetPanelController {
         p.hasShadow = true
 
         let container = DragView(frame: NSRect(origin: .zero, size: PetPanelController.size))
+        containerView = container
         container.onClick = onClick
         container.onDragBegin = { [weak self] in self?.dragging = true }
         container.onDragEnd = { [weak self] _ in
@@ -781,7 +874,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     func applicationDidFinishLaunching(_ notification: Notification) {
         let saved = state.petOrigin.map { NSPoint(x: CGFloat($0[0]), y: CGFloat($0[1])) }
         pet = PetPanelController(savedOrigin: saved,
-                                 onClick: { [weak self] in self?.jumpToZCode(workspacePath: nil) },
+                                 onClick: { [weak self] in self?.toggleTaskList() },
                                  onDragEnd: { [weak self] origin in
                                      self?.state.petOrigin = [Double(origin.x), Double(origin.y)]
                                      self?.state.save()
@@ -1144,6 +1237,32 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     @objc private func openTaskResult(_ sender: NSMenuItem) {
         guard let id = sender.representedObject as? String else { return }
         showResultPanel(taskId: id)
+    }
+
+    // MARK: 宠物点击 → 任务清单 popover
+
+    private func toggleTaskList() {
+        guard let anchor = pet.containerView else { return }
+        TaskListPopover.shared.toggle(anchor: anchor,
+                                      running: lastRunning,
+                                      unread: lastUnread,
+                                      target: self,
+                                      action: #selector(taskRowPicked(_:)))
+    }
+
+    @objc private func taskRowPicked(_ sender: NSButton) {
+        guard let key = sender.identifier?.rawValue,
+              let sep = key.firstIndex(of: "|") else { return }
+        let prefix = String(key[..<sep])
+        let id = String(key[key.index(after: sep)...])
+        TaskListPopover.shared.close()
+        if prefix == "run" {
+            if let ws = lastRunning.first(where: { $0.id == id })?.ws, !ws.isEmpty {
+                jumpToZCode(workspacePath: ws)
+            }
+        } else {
+            showResultPanel(taskId: id)
+        }
     }
 
     /// 任务结果面板：标题/状态/完成时间来自 tasks-index 快照，正文来自 cli 消息库。
