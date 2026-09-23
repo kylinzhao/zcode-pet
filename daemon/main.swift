@@ -25,6 +25,10 @@
 //     重绘为像素画。--render-art <dir> 可导出全部手绘皮肤的 PNG 自检（含行宽校验）。
 // v0.7.2 图片资产通道：樱木/恐龙/白兵改为 mmx image-01 生成贴纸（daemon/assets/pet/，
 //     install.sh 拷入 Resources/pet-art/），面板与图标优先用资产，缺失自动降级像素画。
+// v0.8 矢量动画皮肤「球球」（emotion-ball 风格）：PetSkin 新增 animated 标记，art 闭包改由
+//     12fps tick 逐帧重绘（PetArt.ballTime 时钟）。渐变圆 + 表情眼 + 眨眼/呼吸，四态情绪体色；
+//     形象参数取自 dreamcall520/emotion-ball-desktop-pet 网页演示渲染源码（详见 PetArt.ball 注释，
+//     独立实现、未用其资产；角色原作者 sam70331，免费非商用需署名）。
 //
 // 构建：bash scripts/install.sh（编译进 .app bundle + ad-hoc 签名）；自检：--test。
 
@@ -228,12 +232,14 @@ struct PetSkin {
     let name: String
     let glyph: String                      // 菜单里的代表 emoji（手绘皮肤也用 emoji 当小图标）
     let idle: String, working: String, celebrate: String, error: String
-    let art: ((PetMode, NSRect) -> Void)?  // 非 nil = 像素画皮肤（作资产兜底）
+    let art: ((PetMode, NSRect) -> Void)?  // 非 nil = 手绘皮肤（像素画作兜底；球球为矢量绘制）
     let asset: Bool                        // true = bundle 里有 pet-art/<id>-<mode>.png 图片资产（mmx 生成）
+    let animated: Bool                     // true = 矢量动画皮肤，由 12fps tick 逐帧重绘（眨眼/呼吸）
 
     init(id: String, name: String, glyph: String? = nil,
          idle: String, working: String, celebrate: String, error: String,
-         art: ((PetMode, NSRect) -> Void)? = nil, asset: Bool = false) {
+         art: ((PetMode, NSRect) -> Void)? = nil, asset: Bool = false,
+         animated: Bool = false) {
         self.id = id
         self.name = name
         self.glyph = glyph ?? idle
@@ -243,6 +249,7 @@ struct PetSkin {
         self.error = error
         self.art = art
         self.asset = asset
+        self.animated = animated
     }
 
     func emoji(for mode: PetMode) -> String {
@@ -257,6 +264,8 @@ struct PetSkin {
 
 let petSkins: [PetSkin] = [
     .init(id: "cat", name: "橘猫", idle: "😺", working: "😸", celebrate: "🎉", error: "😿"),
+    .init(id: "ball", name: "球球", idle: "⚪", working: "🔵", celebrate: "🟡", error: "🔴",
+          art: { PetArt.ball($0, in: $1) }, animated: true),
     .init(id: "sakuragi", name: "樱木花道", idle: "🏀", working: "🏀", celebrate: "🎉", error: "😵",
           art: { PetArt.pixel(PetArt.sakuragiSheet, $0, in: $1) }, asset: true),
     .init(id: "blackcat", name: "黑猫", idle: "🐈‍⬛", working: "🐈‍⬛", celebrate: "🎉", error: "😿"),
@@ -390,6 +399,143 @@ enum PetArt {
                 c.setFill()
                 NSBezierPath(rect: NSRect(x: ox + CGFloat(ci) * cell, y: y,
                                           width: cell + 0.5, height: cell + 0.5)).fill()
+            }
+        }
+    }
+
+    // MARK: 球球（emotion-ball 风格矢量皮肤：渐变圆 + 表情眼，眨眼/呼吸动画）
+    //
+    // 形象参考 dreamcall520/emotion-ball-desktop-pet（角色原作者 sam70331，免费非商用需署名）。
+    // 以下参数取自其网页演示的渲染源码，为本项目按参数独立实现的矢量绘制，
+    // 未使用其任何美术资产或数据文件：
+    //   身体 = 正圆，径向渐变焦点 (38%, 32%)、半径 75%，三段 stop（体色 +0.22 / 原色 / -0.12）
+    //   眼睛 = #1A1A1A 竖椭圆，宽 .275R 高 .37R，两眼中心距 .43R，眼心高于球心 .46R
+    //   眨眼 = 间隔 6~14s 随机，合上 → 停 70ms → 过冲 1.08 → 300ms 落回 1
+    //   呼吸 = 纵向 ±1%（breathe 0.01）
+    // 四种状态配情绪体色：米白 / 静心蓝 / 暖金 / 珊瑚红（后三色取自其官网彩带调色板）。
+
+    /// 矢量动画皮肤的动画时钟（秒），由 PetView.tick 以 12fps 喂
+    static var ballTime: CGFloat = 0
+
+    private static let ballInk = NSColor(srgbRed: 0x1A / 255, green: 0x1A / 255, blue: 0x1A / 255, alpha: 1)
+    private static func ballBody(_ mode: PetMode) -> NSColor {
+        switch mode {
+        case .idle: return NSColor(srgbRed: 0xF3 / 255, green: 0xF0 / 255, blue: 0xEA / 255, alpha: 1)
+        case .working: return NSColor(srgbRed: 0x7F / 255, green: 0xA8 / 255, blue: 0xEE / 255, alpha: 1)
+        case .celebrate: return NSColor(srgbRed: 0xF5 / 255, green: 0xB1 / 255, blue: 0x3F / 255, alpha: 1)
+        case .error: return NSColor(srgbRed: 0xF9 / 255, green: 0x70 / 255, blue: 0x5C / 255, alpha: 1)
+        }
+    }
+
+    /// 官网 shade()：sRGB 分量向黑/白线性插值（amt>0 变亮、<0 变暗）
+    private static func shade(_ c: NSColor, _ amt: CGFloat) -> NSColor {
+        let s = c.usingColorSpace(.sRGB) ?? c
+        let target: CGFloat = amt < 0 ? 0 : 1
+        let a = abs(amt)
+        func mix(_ v: CGFloat) -> CGFloat { v + (target - v) * a }
+        return NSColor(srgbRed: mix(s.redComponent), green: mix(s.greenComponent),
+                       blue: mix(s.blueComponent), alpha: 1)
+    }
+
+    /// 确定性伪随机 0..1（SplitMix64）：眨眼时刻序列固定，静态导出与运行时一致
+    private static func ballHash(_ k: Int) -> CGFloat {
+        var x = UInt64(truncatingIfNeeded: k) &+ 0x9E3779B97F4A7C15
+        x ^= x >> 30; x &*= 0xBF58476D1CE4E5B9
+        x ^= x >> 27; x &*= 0x94D049BB133111EB
+        x ^= x >> 31
+        return CGFloat(Double(x >> 11) / Double(1 << 53))
+    }
+
+    /// t 秒的眼睛开合度：先定位 t 之前最近一次眨眼起点，再按关键帧取值
+    private static func blinkOpenness(_ t: CGFloat) -> CGFloat {
+        var start: CGFloat = 3.2
+        var k = 0
+        while k < 10000 {
+            let gap: CGFloat = 6 + ballHash(k &+ 77) * 8
+            if start + gap > t { break }
+            start += gap
+            k += 1
+        }
+        let u = t - start
+        if u < 0 { return 1 }
+        if u < 0.06 { return 1 - u / 0.06 }                      // 合上
+        if u < 0.13 { return 0 }                                 // 停 70ms
+        if u < 0.25 { let p = (u - 0.13) / 0.12                  // 睁到 1.08（smoothstep）
+            return 1.08 * (p * p * (3 - 2 * p)) }
+        if u < 0.55 { return 1.08 - 0.08 * (u - 0.25) / 0.3 }    // 300ms 落回 1
+        return 1
+    }
+
+    static func ball(_ mode: PetMode, in rect: NSRect) {
+        let cx = rect.midX, cy = rect.midY
+        let R = min(rect.width, rect.height) / 2 - 2
+        let color = ballBody(mode)
+        let breathe = 1 + 0.01 * sin(2 * .pi * 0.15 * ballTime)   // 呼吸 ±1%
+
+        // 身体：呼吸只纵向缩放（锚在球心），保持底部贴地感
+        let bodyRect = NSRect(x: cx - R, y: cy - R * breathe, width: R * 2, height: R * 2 * breathe)
+        let body = NSBezierPath(ovalIn: bodyRect)
+
+        // 三段径向渐变，焦点在左上（官网 cx 38% / cy 32%，AppKit y 向上 → 68%）
+        NSGraphicsContext.current?.saveGraphicsState()
+        body.addClip()
+        let focus = NSPoint(x: cx - 0.24 * R, y: cy + 0.36 * R)
+        if let grad = NSGradient(colors: [shade(color, 0.22), color, shade(color, -0.12)],
+                                 atLocations: [0, 0.62, 1], colorSpace: .sRGB) {
+            grad.draw(fromCenter: focus, radius: 0, toCenter: focus, radius: 1.5 * R, options: [])
+        }
+        NSGraphicsContext.current?.restoreGraphicsState()
+        shade(color, -0.3).withAlphaComponent(0.5).setStroke()    // 淡轮廓：浅色桌面下兜住边缘
+        body.lineWidth = 0.8
+        body.stroke()
+
+        // 眼睛几何（比例来自官网默认表情眼环）
+        let eyeW = 0.275 * R, eyeH = 0.37 * R
+        let eyeGap = 0.43 * R
+        let eyeY = cy + 0.46 * R
+
+        switch mode {
+        case .celebrate:
+            // 笑眼：下弯弧 + 圆头粗线
+            for side in [-1.0, 1.0] {
+                let ex = cx + side * eyeGap / 2
+                let p = NSBezierPath()
+                p.move(to: NSPoint(x: ex - eyeW / 2, y: eyeY + eyeH * 0.2))
+                p.curve(to: NSPoint(x: ex + eyeW / 2, y: eyeY + eyeH * 0.2),
+                        controlPoint1: NSPoint(x: ex - eyeW * 0.18, y: eyeY - eyeH * 0.42),
+                        controlPoint2: NSPoint(x: ex + eyeW * 0.18, y: eyeY - eyeH * 0.42))
+                p.lineWidth = eyeH * 0.34
+                p.lineCapStyle = .round
+                ballInk.setStroke()
+                p.stroke()
+            }
+        case .error:
+            // 怒眼：八字眉 + 压扁的眼
+            for side in [-1.0, 1.0] {
+                let ex = cx + side * eyeGap / 2
+                let brow = NSBezierPath()
+                brow.move(to: NSPoint(x: ex + side * eyeW * 0.62, y: eyeY + eyeH * 0.62))
+                brow.line(to: NSPoint(x: ex - side * eyeW * 0.42, y: eyeY + eyeH * 0.18))
+                brow.lineWidth = max(1.1, eyeH * 0.14)
+                brow.lineCapStyle = .round
+                ballInk.setStroke()
+                brow.stroke()
+                let h = eyeH * 0.45
+                ballInk.setFill()
+                NSBezierPath(ovalIn: NSRect(x: ex - eyeW / 2, y: eyeY - h / 2,
+                                            width: eyeW, height: h)).fill()
+            }
+        default:
+            // 睁眼（idle / working）：竖椭圆，高度乘眨眼开合度；working 专注微眯 + 眼神略上移
+            var open = blinkOpenness(ballTime)
+            var ey = eyeY
+            if case .working = mode { open *= 0.85; ey += eyeH * 0.12 }
+            let h = max(eyeH * open, 1.1)                          // 闭合时留一条线
+            ballInk.setFill()
+            for side in [-1.0, 1.0] {
+                let ex = cx + side * eyeGap / 2
+                NSBezierPath(ovalIn: NSRect(x: ex - eyeW / 2, y: ey - h / 2,
+                                            width: eyeW, height: h)).fill()
             }
         }
     }
@@ -1071,6 +1217,7 @@ final class PetPanelController {
     private var emojiField: NSTextField!
     private var artView: NSImageView!          // 手绘皮肤画面
     private var artCache: [String: NSImage] = [:]
+    private var activeSkin: PetSkin?           // tick 逐帧重绘动画皮肤（球球）用
     private var captionField: NSTextField!
     private var baseOrigin: NSPoint = .zero
     private var phase: Double = 0
@@ -1160,18 +1307,23 @@ final class PetPanelController {
     }
 
     func update(mode: PetMode, skin: PetSkin, runningCount: Int, unreadCount: Int) {
+        activeSkin = skin
         if skin.asset, let img = PetArt.assetImage(id: skin.id, mode: mode) {
             // 图片资产皮肤（mmx 生成）
             emojiField.isHidden = true
             artView.isHidden = false
             artView.image = img
-        } else if let art = skin.art {
-            // 像素画皮肤：按 skin+mode 渲染一次并缓存
+        } else if skin.art != nil {
+            // 手绘皮肤：像素画按 skin+mode 渲染一次并缓存；矢量动画皮肤由 tick 逐帧重绘
             emojiField.isHidden = true
             artView.isHidden = false
-            let key = "\(skin.id)-\(mode)"
-            if artCache[key] == nil { artCache[key] = PetArt.image(skin: skin, mode: mode) }
-            artView.image = artCache[key]
+            if skin.animated {
+                artView.image = PetArt.image(skin: skin, mode: mode)
+            } else {
+                let key = "\(skin.id)-\(mode)"
+                if artCache[key] == nil { artCache[key] = PetArt.image(skin: skin, mode: mode) }
+                artView.image = artCache[key]
+            }
         } else {
             artView.isHidden = true
             emojiField.isHidden = false
@@ -1193,6 +1345,7 @@ final class PetPanelController {
     func tick(mode: PetMode) {
         guard panel != nil, !dragging else { return }
         phase += 1.0 / 12.0
+        PetArt.ballTime += 1.0 / 12.0
         var dy: CGFloat = 0
         switch mode {
         case .working: dy = CGFloat(sin(phase * 2 * .pi * 0.8)) * 4
@@ -1201,6 +1354,10 @@ final class PetPanelController {
         case .idle: dy = CGFloat(sin(phase * 2 * .pi * 0.15)) * 2
         }
         panel.setFrameOrigin(NSPoint(x: baseOrigin.x, y: baseOrigin.y + dy))
+        // 矢量动画皮肤（球球）：眨眼/呼吸逐帧重画。208×136 位图 12fps，开销可忽略
+        if let skin = activeSkin, skin.animated, !artView.isHidden {
+            artView.image = PetArt.image(skin: skin, mode: mode)
+        }
     }
 }
 

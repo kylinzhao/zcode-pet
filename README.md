@@ -9,7 +9,7 @@
 😿 任务出错了 ⚠️            ← 有任务失败（颤抖动画 + 必须点掉的弹窗）
 ```
 
-菜单栏 `🐾 N 📬M`：N = 执行中任务数，M = 未读完成数。下拉可看清单（**点击直达对应工作区**）、切换 17 款皮肤——14 款 emoji（猫/狗/熊猫/企鹅/火箭/机器人/幽灵…）+ 3 款手绘（**樱木花道、恐龙、白兵**：MiniMax image-01 生成的贴纸风立绘，四种状态各一个姿势，像素画作离线兜底）、静音。
+菜单栏 `🐾 N 📬M`：N = 执行中任务数，M = 未读完成数。下拉可看清单（**点击直达对应工作区**）、切换 18 款皮肤——14 款 emoji（猫/狗/熊猫/企鹅/火箭/机器人/幽灵…）+ 3 款手绘（**樱木花道、恐龙、白兵**：MiniMax image-01 生成的贴纸风立绘，四种状态各一个姿势，像素画作离线兜底）+ **球球**（emotion-ball 风格矢量渐变圆：会眨眼会呼吸，四种状态换情绪体色，idle 米白 / working 静心蓝 / celebrate 暖金 / error 珊瑚红）、静音。
 
 ## 功能
 
@@ -54,7 +54,7 @@ bash scripts/install.sh
 ## 日常使用
 
 - **点宠物** = 跳回 ZCode；**按住拖动** = 挪位置（自动记忆）
-- **菜单栏 🐾**：执行中/未读清单（点击直达）、宠物造型（17 款皮肤）、静音 30 分钟、Stop hook 心跳、退出
+- **菜单栏 🐾**：执行中/未读清单（点击直达）、宠物造型（18 款皮肤）、静音 30 分钟、Stop hook 心跳、退出
 - **改配置**（可选）：`~/.zcode-pet/config.json`
 
 ```json
@@ -119,5 +119,9 @@ bash scripts/install.sh    # 改 daemon/main.swift 后重跑即重新编译部�
   `Resources/pet-art/`；像素画为 26×17 字符矩阵（`PetArt`），改完可
   `~/.zcode-pet/zcode-pet.app/Contents/MacOS/zcode-pet-daemon --render-art /tmp/pet-art`
   导出 PNG 自检（含行宽校验）
+- **球球**（`animated` 皮肤）：纯矢量 CoreGraphics 绘制（`PetArt.ball`），不走资产/像素矩阵；
+  由 12fps tick 逐帧重绘实现眨眼（6~14s 随机、过冲回弹）与呼吸。形象参数参考
+  [emotion-ball-desktop-pet](https://github.com/dreamcall520/emotion-ball-desktop-pet)
+  网页演示的渲染源码独立实现（角色原作者 sam70331，免费非商用需署名）
 
 MIT License
