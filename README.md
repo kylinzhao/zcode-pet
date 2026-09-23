@@ -9,7 +9,7 @@
 😿 任务出错了 ⚠️            ← 有任务失败（颤抖动画 + 必须点掉的弹窗）
 ```
 
-菜单栏 `🐾 N 📬M`：N = 执行中任务数，M = 未读完成数。下拉可看清单（**点击直达对应工作区**）、切换 7 款皮肤——**矢量动画家族 4 款**（球球/饭团/菱菱/蛋蛋：emotion-ball 风格渐变脸，会眨眼、呼吸、**眼神跟随鼠标**，鼠标贴近时瞳孔放大注视你；四种状态换情绪体色 米白/静心蓝/暖金/珊瑚红）+ **手绘贴纸 3 款**（樱木花道/恐龙/白兵：MiniMax image-01 生成，像素画作离线兜底）、静音。
+菜单栏 `🐾 N 📬M`：N = 执行中任务数，M = 未读完成数。下拉可看清单（**点击直达对应工作区**）、切换 7 款皮肤——**矢量动画家族 4 款**（球球/饭团/菱菱/蛋蛋：emotion-ball 风格渐变脸，会眨眼、呼吸、**眼神跟随鼠标**，鼠标贴近时瞳孔放大注视你，休息时每隔几十秒打一次呵欠；四种状态换情绪体色 米白/静心蓝/暖金/珊瑚红，各有专属嘴型）+ **大头贴 3 款**（豚豚水豚/墨墨章鱼/菇菇蘑菇：MiniMax image-01 生成的 q 版头像贴纸，四状态各一个表情）、静音。
 
 ## 功能
 
@@ -114,16 +114,16 @@ bash scripts/install.sh    # 改 daemon/main.swift 后重跑即重新编译部�
 
 - 守护进程：`daemon/main.swift`（Swift/AppKit 单文件，皮肤表 `petSkins`、轮询状态机、UN 通知）
 - 插件：`plugins/zcode-pet/`（SessionStart 拉起守护进程、UserPromptSubmit/Stop 转发回合事件）
-- **手绘皮肤**：优先级 = 图片资产 > 像素画 > emoji。图片资产在 `daemon/assets/pet/<skin>-<mode>.png`
-  （512² 透明底贴纸，mmx image-01 生成：品红底出图 → 泛洪抠底 → 裁切），install.sh 拷入 bundle
-  `Resources/pet-art/`；像素画为 26×17 字符矩阵（`PetArt`），改完可
-  `~/.zcode-pet/zcode-pet.app/Contents/MacOS/zcode-pet-daemon --render-art /tmp/pet-art`
-  导出 PNG 自检（含行宽校验）
-- **球球一族**（`animated` 皮肤）：纯矢量 CoreGraphics 绘制（`PetArt.drawVector`），不走资产/像素矩阵；
-  由 12fps tick 逐帧重绘实现眨眼（6~14s 随机、过冲回弹）、呼吸（±1%）与**眼神跟随**（读全局鼠标，
-  视向平滑逼近；贴近 ~90pt 内瞳孔微放大）。形状家族沿其 blob/wedge/gem 三体型思路：球球（圆）、
+- **大头贴皮肤**：优先级 = 图片资产 > emoji。资产在 `daemon/assets/pet/<skin>-<mode>.png`
+  （512² 透明底贴纸，mmx image-01 生成：白底出图 → 白底泛洪抠底 → 裁切，`--subject-ref`
+  锁角色一致性），install.sh 拷入 bundle `Resources/pet-art/`
+- **球球一族**（`animated` 皮肤）：纯矢量 CoreGraphics 绘制（`PetArt.drawVector`），不走资产；
+  由 12fps tick 逐帧重绘实现眨眼（6~14s 随机、过冲回弹）、呼吸（±1%）、嘴型（微笑/抿嘴/大笑/撇嘴）
+  与**眼神跟随**（读全局鼠标，视向平滑逼近；贴近 ~90pt 内瞳孔微放大，>380pt 转为慢速漫游）。
+  idle 每隔 22~34s 打一次呵欠（张嘴挤眼 2.6s）。形状家族沿其 blob/wedge/gem 三体型思路：球球（圆）、
   饭团（圆角三角 + 海苔）、菱菱（超椭圆 n=1.4 菱形 + 腮红）、蛋蛋（竖椭圆 + 呆毛 + 腮红）。
   基础画法参数参考 [emotion-ball-desktop-pet](https://github.com/dreamcall520/emotion-ball-desktop-pet)
-  网页演示的渲染源码独立实现（角色原作者 sam70331，免费非商用需署名）
+  网页演示的渲染源码独立实现（角色原作者 sam70331，免费非商用需署名）；
+  矢量皮肤可 `--render-art /tmp/pet-art` 导出 PNG 自检
 
 MIT License

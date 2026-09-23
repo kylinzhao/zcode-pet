@@ -33,6 +33,10 @@
 //     新增饭团（海苔）/菱菱（超椭圆菱）/蛋蛋（呆毛+腮红），海苔/呆毛/腮红为原创装饰；
 //     14 款 emoji 皮肤下线；眼神跟随鼠标（setEye lookX/lookY 语义）+ 邻近注视
 //     （鼠标贴近时瞳孔微放大，蔚来 NOMI 式反应）。
+// v1.0 全矢量 + 大头贴：面板放大 25%（130×136）字号加大；矢量脸新增嘴部表情与
+//     idle 打呵欠（22~34s 一次）；樱木/恐龙/白兵下线（像素画引擎随之移除），
+//     新增 mmx image-01 大头贴三角色——豚豚(水豚)/墨墨(章鱼)/菇菇(蘑菇)，
+//     白底出图 → 白底泛洪抠底 → 裁切 512²（daemon/assets/pet/，subject-ref 锁角色一致性）。
 //
 // 构建：bash scripts/install.sh（编译进 .app bundle + ad-hoc 签名）；自检：--test。
 
@@ -266,8 +270,8 @@ struct PetSkin {
     }
 }
 
-// v0.9：纯 emoji 皮肤下线——菜单只留矢量动画家族（4）+ 手绘资产皮肤（3）。
-// emoji 字段仅作渲染失败时的最后兜底显示。
+// v0.9：纯 emoji 皮肤下线——菜单只留矢量动画家族（4）+ mmx 大头贴（3）。
+// emoji 字段仅作资产加载失败时的最后兜底显示。
 let petSkins: [PetSkin] = [
     .init(id: "ball", name: "球球", idle: "⚪", working: "🔵", celebrate: "🟡", error: "🔴",
           art: PetArt.vectorPet(.init(shape: .round)), animated: true),
@@ -283,12 +287,9 @@ let petSkins: [PetSkin] = [
           art: PetArt.vectorPet(.init(shape: .egg,
                                       idleColor: NSColor(srgbRed: 0xF6 / 255, green: 0xD6 / 255, blue: 0x8C / 255, alpha: 1),
                                       ahoge: true, blush: true)), animated: true),
-    .init(id: "sakuragi", name: "樱木花道", idle: "🏀", working: "🏀", celebrate: "🎉", error: "😵",
-          art: { PetArt.pixel(PetArt.sakuragiSheet, $0, in: $1) }, asset: true),
-    .init(id: "trex", name: "恐龙", idle: "🦖", working: "🦕", celebrate: "🎉", error: "😵",
-          art: { PetArt.pixel(PetArt.dinoSheet, $0, in: $1) }, asset: true),
-    .init(id: "trooper", name: "白兵", idle: "🪖", working: "🪖", celebrate: "🎉", error: "😵",
-          art: { PetArt.pixel(PetArt.trooperSheet, $0, in: $1) }, asset: true),
+    .init(id: "capybara", name: "豚豚", idle: "🦫", working: "🦫", celebrate: "🎉", error: "😵", asset: true),
+    .init(id: "octopus", name: "墨墨", idle: "🐙", working: "🐙", celebrate: "🎉", error: "😵", asset: true),
+    .init(id: "mushroom", name: "菇菇", idle: "🍄", working: "🍄", celebrate: "🎉", error: "😵", asset: true),
 ]
 
 func currentSkin() -> PetSkin {
@@ -296,14 +297,14 @@ func currentSkin() -> PetSkin {
     return petSkins.first { $0.id == id } ?? petSkins[0]
 }
 
-// MARK: - 手绘宠物（像素画：26×17 字符矩阵逐格上色，非 emoji 皮肤）
+// MARK: - 宠物美术（矢量动画皮肤 + 图片资产皮肤）
 //
-// 每个角色 4 帧（idle/working/celebrate/error），行 0 = 画面顶部，'.' 透明，其余字符查调色板。
-// 画布 26×17 格 × 4pt = 104×68（与宠物面板 art 区同比例）。--render-art <dir> 导出 PNG 自检。
+// 矢量皮肤：PetArt.drawVector 逐帧绘制（眨眼/呼吸/眼神跟随/呵欠），画布 130×84
+// 与宠物面板 art 区同比例；--render-art <dir> 可导出全部矢量皮肤的 PNG 自检。
 
 enum PetArt {
-    static let W: CGFloat = 104
-    static let H: CGFloat = 68
+    static let W: CGFloat = 130
+    static let H: CGFloat = 84
 
     // MARK: 渲染入口
 
@@ -345,15 +346,6 @@ enum PetArt {
     static func exportAll(to dir: String) -> Int32 {
         try? FileManager.default.createDirectory(atPath: dir, withIntermediateDirectories: true)
         var failures = 0
-        // 行宽校验（像素画手写最容易错这个）
-        for (id, sheet) in [("trex", dinoSheet), ("sakuragi", sakuragiSheet), ("trooper", trooperSheet)] {
-            for (mode, rows) in sheet.frames {
-                for (i, row) in rows.enumerated() where row.count != 26 {
-                    print("⚠️ 像素画 \(id)/\(modeName(mode)) 第 \(i) 行宽 \(row.count) ≠ 26")
-                    failures += 1
-                }
-            }
-        }
         for skin in petSkins where skin.art != nil {
             for mode in [PetMode.idle, .working, .celebrate, .error] {
                 let png = bitmap(skin: skin, mode: mode, scale: 4).representation(using: .png, properties: [:])
@@ -378,36 +370,7 @@ enum PetArt {
         }
     }
 
-    // MARK: 像素画引擎
-
-    struct PixelSheet {
-        let palette: [Character: NSColor]
-        let frames: [PetMode: [String]]   // 每帧 = 行字符串数组（26×17），'.' 透明
-    }
-
-    private static func rgb(_ r: CGFloat, _ g: CGFloat, _ b: CGFloat) -> NSColor {
-        NSColor(srgbRed: r, green: g, blue: b, alpha: 1)
-    }
-
-    /// 字符画逐格填充：格 = min(rect/网格) 等比，格尺寸 +0.5pt 重叠防缩放接缝
-    static func pixel(_ sheet: PixelSheet, _ mode: PetMode, in rect: NSRect) {
-        guard let rows = sheet.frames[mode] ?? sheet.frames[.idle], let first = rows.first else { return }
-        let gw = CGFloat(first.count), gh = CGFloat(rows.count)
-        let cell = min(rect.width / gw, rect.height / gh)
-        let ox = rect.midX - gw * cell / 2
-        let oy = rect.midY - gh * cell / 2
-        for (ri, row) in rows.enumerated() {
-            let y = oy + (gh - CGFloat(ri) - 1) * cell   // 行 0 = 顶部，AppKit 原点左下
-            for (ci, ch) in row.enumerated() where ch != "." {
-                guard let c = sheet.palette[ch] else { continue }
-                c.setFill()
-                NSBezierPath(rect: NSRect(x: ox + CGFloat(ci) * cell, y: y,
-                                          width: cell + 0.5, height: cell + 0.5)).fill()
-            }
-        }
-    }
-
-    // MARK: 矢量皮肤家族（emotion-ball 风格：渐变身体 + 表情眼，眨眼/呼吸/眼神跟随）
+    // MARK: 矢量皮肤家族（emotion-ball 风格：渐变身体 + 表情眼，眨眼/呼吸/眼神跟随/呵欠）
     //
     // 形象参考 dreamcall520/emotion-ball-desktop-pet（角色原作者 sam70331，免费非商用需署名）。
     // 基础画法参数取自其网页演示渲染源码，为本项目按参数独立实现的矢量绘制，
@@ -416,9 +379,9 @@ enum PetArt {
     //   眼睛 = #1A1A1A 竖椭圆（圆脸基准：宽 .275R 高 .37R、中心距 .43R、眼心高于球心 .46R）
     //   眨眼 = 间隔 6~14s 随机，合上 → 停 70ms → 过冲 1.08 → 300ms 落回 1
     //   呼吸 = 纵向 ±1%（breathe 0.01）
-    //   眼神跟随 = setEye 的 lookX/lookY 语义：眼心向鼠标方向平移（本项目扩展了邻近注视）
+    //   眼神跟随 = setEye 的 lookX/lookY 语义：眼心向鼠标方向平移（本项目扩展了邻近注视/远处漫游）
     // 形状家族沿用其 blob（圆）/ wedge（三角）/ gem（菱形）三体型的思路独立绘制；
-    // 饭团的海苔、蛋蛋的呆毛与腮红、以及全部表情为本项目原创。
+    // 饭团的海苔、蛋蛋的呆毛与腮红、嘴部表情与打呵欠为本项目原创。
     // 情绪体色：idle 各显个性色，working 静心蓝 / celebrate 暖金 / error 珊瑚红家族统一
     // （后三色取自其官网彩带调色板）。
 
@@ -466,7 +429,7 @@ enum PetArt {
                        blue: mix(s.blueComponent), alpha: 1)
     }
 
-    /// 确定性伪随机 0..1（SplitMix64）：眨眼时刻序列固定，静态导出与运行时一致
+    /// 确定性伪随机 0..1（SplitMix64）：眨眼/呵欠时刻序列固定，静态导出与运行时一致
     private static func ballHash(_ k: Int) -> CGFloat {
         var x = UInt64(truncatingIfNeeded: k) &+ 0x9E3779B97F4A7C15
         x ^= x >> 30; x &*= 0xBF58476D1CE4E5B9
@@ -493,6 +456,24 @@ enum PetArt {
             return 1.08 * (p * p * (3 - 2 * p)) }
         if u < 0.55 { return 1.08 - 0.08 * (u - 0.25) / 0.3 }    // 300ms 落回 1
         return 1
+    }
+
+    /// t 秒的呵欠幅度 0..1：每 22~34s 一次（仅 idle 用），2.6s 序列 = 张开 0.7s → 保持 1s → 闭合 0.9s
+    static func yawnAmount(_ t: CGFloat) -> CGFloat {
+        var start: CGFloat = 9.0
+        var k = 0
+        while k < 10000 {
+            let gap: CGFloat = 22 + ballHash(k &+ 913) * 12
+            if start + gap > t { break }
+            start += gap
+            k += 1
+        }
+        let u = t - start
+        if u < 0 || u > 2.6 { return 0 }
+        if u < 0.7 { let p = u / 0.7; return p * p * (3 - 2 * p) }
+        if u < 1.7 { return 1 }
+        let p = (u - 1.7) / 0.9
+        return 1 - p * p * (3 - 2 * p)
     }
 
     /// 超椭圆 |x/a|^n + |y/b|^n = 1 采样折线（n=2 椭圆，n<2 趋向菱形）
@@ -656,9 +637,11 @@ enum PetArt {
                                             width: eyeW, height: h)).fill()
             }
         default:
-            // 睁眼（idle / working）：竖椭圆，高度乘眨眼开合度；working 专注微眯 + 眼神略上移
+            // 睁眼（idle / working）：竖椭圆 × 眨眼开合度；working 专注微眯；idle 呵欠时挤眯
             var open = blinkOpenness(ballTime)
             var ey = g.eyeY
+            let yawn: CGFloat = mode == .idle ? yawnAmount(ballTime) : 0
+            open *= 1 - 0.75 * yawn
             if case .working = mode { open *= 0.85; ey += eyeH * 0.12 }
             let h = max(eyeH * open, 1.1)                          // 闭合时留一条线
             ballInk.setFill()
@@ -666,6 +649,54 @@ enum PetArt {
                 let ex = side * g.gap / 2 + gx
                 NSBezierPath(ovalIn: NSRect(x: ex - eyeW / 2, y: ey + gy - h / 2,
                                             width: eyeW, height: h)).fill()
+            }
+        }
+
+        // 嘴巴：表情点睛（呵欠张嘴 > 一切）。位置 = 眼下 0.28R，避开饭团海苔
+        let mouthY = g.eyeY + gy - 0.28 * R
+        let mouthW = 0.14 * R * g.scale
+        let mouth = NSBezierPath()
+        mouth.lineCapStyle = .round
+        switch mode {
+        case .celebrate:
+            // 大笑：张开的椭圆嘴
+            ballInk.setFill()
+            NSBezierPath(ovalIn: NSRect(x: -mouthW * 1.15, y: mouthY - 0.09 * R,
+                                        width: mouthW * 2.3, height: 0.17 * R)).fill()
+        case .error:
+            // 撇嘴：上弯弧
+            mouth.move(to: NSPoint(x: -mouthW, y: mouthY - 0.035 * R))
+            mouth.curve(to: NSPoint(x: mouthW, y: mouthY - 0.035 * R),
+                        controlPoint1: NSPoint(x: -mouthW * 0.4, y: mouthY + 0.045 * R),
+                        controlPoint2: NSPoint(x: mouthW * 0.4, y: mouthY + 0.045 * R))
+            mouth.lineWidth = 0.045 * R
+            ballInk.setStroke()
+            mouth.stroke()
+        case .working:
+            // 认真抿嘴：短平线
+            mouth.move(to: NSPoint(x: -mouthW * 0.7, y: mouthY))
+            mouth.line(to: NSPoint(x: mouthW * 0.7, y: mouthY))
+            mouth.lineWidth = 0.04 * R
+            ballInk.setStroke()
+            mouth.stroke()
+        case .idle:
+            let yawn = yawnAmount(ballTime)
+            if yawn > 0.02 {
+                // 打呵欠：张圆嘴，越困越大
+                ballInk.setFill()
+                NSBezierPath(ovalIn: NSRect(x: -mouthW * (0.6 + 0.4 * yawn),
+                                            y: mouthY - 0.11 * R * yawn,
+                                            width: mouthW * 2 * (0.6 + 0.4 * yawn),
+                                            height: 0.22 * R * yawn)).fill()
+            } else {
+                // 微笑：下弯浅弧
+                mouth.move(to: NSPoint(x: -mouthW * 0.8, y: mouthY + 0.03 * R))
+                mouth.curve(to: NSPoint(x: mouthW * 0.8, y: mouthY + 0.03 * R),
+                            controlPoint1: NSPoint(x: -mouthW * 0.3, y: mouthY - 0.035 * R),
+                            controlPoint2: NSPoint(x: mouthW * 0.3, y: mouthY - 0.035 * R))
+                mouth.lineWidth = 0.045 * R
+                ballInk.setStroke()
+                mouth.stroke()
             }
         }
 
@@ -685,260 +716,6 @@ enum PetArt {
         assetCache[key] = .some(img)
         return img
     }
-
-    // MARK: 恐龙（绿皮肤 + 背角刺 + 浅色口鼻）
-
-    static let dinoSheet = PixelSheet(
-        palette: ["G": rgb(0.33, 0.70, 0.36), "L": rgb(0.82, 0.92, 0.72), "D": rgb(0.20, 0.48, 0.24),
-                  "W": .white, "K": rgb(0.16, 0.13, 0.10), "R": rgb(0.88, 0.35, 0.40), "B": rgb(0.40, 0.72, 0.98)],
-        frames: [
-            .idle: [
-                "......DD....DD....DD......",
-                "........GGGGGGGGGG........",
-                "......GGGGGGGGGGGGGG......",
-                ".....GGGGGGGGGGGGGGGG.....",
-                ".....GGGGWWGGGGWWGGGG.....",
-                ".....GGGGWKGGGGKWGGGG.....",
-                ".....GGGGWWGGGGWWGGGG.....",
-                ".....GLLGGGGGGGGGGLLG.....",
-                ".....GGGLLLLLLLLLLGGG.....",
-                ".....GGGLLLDLLDLLLGGG.....",
-                ".....GGGLLDLLLLDLLGGG.....",
-                "..DD.GGGLLLDDDDLLLGGG..DD.",
-                "..DD.GGGGGGGGGGGGGGGG..DD.",
-                "..DD.GGGGLLLLLLLLGGGG..DD.",
-                "......GGGLLLLLLLLGGG......",
-                "........GGLLLLLLGG........",
-                "..........LLLLLL..........",
-            ],
-            .working: [
-                "......DD....DD....DD......",
-                "........GGGGGGGGGG........",
-                "......GGGGGGGGGGGGGG......",
-                ".....GGGGGGGGGGGGGGGG..B..",
-                ".....GGGGGGGGGGGGGGGG.BB..",
-                ".....GGGGGGGGGGGGGGGG.....",
-                ".....GGGGGGGGGGGGGGGG.....",
-                ".....GGGGWKGGGGKWGGGG.....",
-                ".....GLLGGGGGGGGGGLLG.....",
-                ".....GGGLLLLLLLLLLGGDDD...",
-                ".....GGGLLLDLLDLLLGGDDD...",
-                ".....GGGLLLLLLLLLLGGDDD...",
-                "..DD.GGGLLLDDDDLLLGGG.....",
-                "..DD.GGGGGGGGGGGGGGGG.....",
-                "..DD.GGGGLLLLLLLLGGGG.....",
-                "......GGGLLLLLLLLGGG......",
-                "........GGLLLLLLGG........",
-            ],
-            .celebrate: [
-                "......DD....DD....DD......",
-                "........GGGGGGGGGG........",
-                "......GGGGGGGGGGGGGG......",
-                ".....GGGGGGGGGGGGGGGG.....",
-                ".....GGGKGGGGGGGGKGGG.....",
-                ".....GGKGKGGGGGGKGKGG.....",
-                ".....GGGGGGGGGGGGGGGG.....",
-                ".....GLLGGGGGGGGGGLLG.....",
-                "..DD.GGGLLLLLLLLLLGGG..DD.",
-                "..DD.GGGLLLDLLDLLLGGG..DD.",
-                "..DD.GGGLLDDDDDDLLGGG..DD.",
-                ".....GGGLLDRRRRDLLGGG.....",
-                ".....GGGGGGGGGGGGGGGG.....",
-                ".....GGGGLLLLLLLLGGGG.....",
-                "......GGGLLLLLLLLGGG......",
-                "........GGLLLLLLGG........",
-                "..........LLLLLL..........",
-            ],
-            .error: [
-                "......DD....DD....DD......",
-                "........GGGGGGGGGG........",
-                "......GGGGGGGGGGGGGG......",
-                ".....GGGGGGGGGGGGGGGG..B..",
-                ".....GGGGGGGGGGGGGGGG.BB..",
-                ".....GGKGKGGGGGGKGKGG.....",
-                ".....GGGKGGGGGGGGKGGG.....",
-                ".....GGKGKGGGGGGKGKGG.....",
-                ".....GLLGGGGGGGGGGLLG.....",
-                ".....GGGLLLLLLLLLLGGG.....",
-                ".....GGGLLLDLLDLLLGGG.....",
-                ".....GGGLLLDDDDLLLGGG.....",
-                "..DD.GGGLDDLLLLDDLGGG..DD.",
-                "..DD.GGGGGGGGGGGGGGGG..DD.",
-                "..DD.GGGGLLLLLLLLGGGG..DD.",
-                "......GGGLLLLLLLLGGG......",
-                "........GGLLLLLLGG........",
-            ],
-        ])
-
-    // MARK: 樱木花道（红发刺头 + 湘北 10 号球衣 + 篮球）
-
-    static let sakuragiSheet = PixelSheet(
-        palette: ["H": rgb(0.86, 0.23, 0.16), "S": rgb(1.00, 0.87, 0.71), "J": rgb(0.73, 0.10, 0.14),
-                  "W": .white, "K": rgb(0.20, 0.11, 0.08), "O": rgb(0.93, 0.55, 0.16),
-                  "N": rgb(0.45, 0.22, 0.05), "B": rgb(0.40, 0.72, 0.98)],
-        frames: [
-            .idle: [
-                "......HH....HH....HH......",
-                "....HHHHHHHHHHHHHHHHHH....",
-                "...HHHHHHHHHHHHHHHHHHHH...",
-                "...HHHHHHHHHHHHHHHHHHHH...",
-                "...HHHHKKHHSSSSHHKKHHHH...",
-                "...HHSSWKSSSSSSSSKWSSHH...",
-                "...HHSSWWSSSSSSSSWWSSHH...",
-                "...HHSSSSSSSSSSSSSSSSHH...",
-                "...HHSSSSKWWWWWWKSSSSHH...",
-                "...HHSSSSSKKKKKKSSSSSHH...",
-                "......SSSSSSSSSSSSSS......",
-                "...SSJJJJJJJJJJJJJJJJ.OOO.",
-                "...SSJWWJJWJJWWWJJWWJONONO",
-                "...SSJJJJWWJJWJWJJJJJONNNO",
-                ".....JJJJJWJJWJWJJJJJONONO",
-                ".....JJJJJWJJWJWJJJJJ.OOO.",
-                ".....JJJJWWWJWWWJJJJJ.....",
-            ],
-            .working: [
-                "......HH....HH....HH......",
-                "....HHHHHHHHHHHHHHHHHH..B.",
-                "...HHHHHHHHHHHHHHHHHHHH.B.",
-                "...HHHHHHHHHHHHHHHHHHHHBB.",
-                "...HHHHKKHHSSSSHHKKHHHH...",
-                "...HHSSSSSSSSSSSSSSSSHH...",
-                "...HHSSWKSSSSSSSSKWSSHH...",
-                "...HHSSSSSSSSSSSSSSSSHH...",
-                "...HHSSSSKWWWWWWKSSSSHH...",
-                "...HHSSSSSSSSSSSSSSSSHH...",
-                "......SSSSSSSSSSSSSS..N...",
-                "...SSJJJJJJJJJJJJJJJJ.SSN.",
-                "...SSJWWJJWJJWWWJJWWJ.OOO.",
-                "...SSJJJJWWJJWJWJJJJJONONO",
-                ".....JJJJJWJJWJWJJJJJONNNO",
-                ".....JJJJJWJJWJWJJJJJONONO",
-                ".....JJJJWWWJWWWJJJJJ.OOO.",
-            ],
-            .celebrate: [
-                "......HH....HH....HH......",
-                "....HHHHHHHHHHHHHHHHHH....",
-                "...HHHHHHHHHHHHHHHHHHHH...",
-                "...HHHHHHHHHHHHHHHHHHHH...",
-                "SS.HHHHHKHHSSSSHHKHHHHH.SS",
-                "SS.HHSSKSKSSSSSSKSKSSHH.SS",
-                "SS.HHSSSSSSSSSSSSSSSSHH.SS",
-                "SS.HHSSSSSSSSSSSSSSSSHH.SS",
-                ".S.HHSSSSKWWWWWWKSSSSHH.S.",
-                "...HHSSSSSKRRRRKSSSSSHH...",
-                "......SSSSSSSSSSSSSS......",
-                "...SSJJJJJJJJJJJJJJJJ.....",
-                "...SSJWWJJWJJWWWJJWWJ.....",
-                "...SSJJJJWWJJWJWJJJJJ.....",
-                ".....JJJJJWJJWJWJJJJJ.....",
-                ".....JJJJJWJJWJWJJJJJ.....",
-                ".....JJJJWWWJWWWJJJJJ.....",
-            ],
-            .error: [
-                "......HH....HH....HH......",
-                "....HHHHHHHHHHHHHHHHHH....",
-                "...HHHHHHHHHHHHHHHHHHHH.B.",
-                "...HHHHHHHHHHHHHHHHHHHHBB.",
-                "...HHHHKHKHSSSSHKHKHHHH...",
-                "...HHSSSKSSSSSSSSKSSSHH...",
-                "...HHSSKSKSSSSSSKSKSSHH...",
-                "...HHSSSSSSSSSSSSSSSSHH...",
-                "...HHSSSSSSKKKKSSSSSSHH...",
-                "...HHSSSSSKSSSSKSSSSSHH...",
-                "......SSSSSSSSSSSSSS......",
-                "...SSJJJJJJJJJJJJJJJJ.SS..",
-                "...SSJWWJJWJJWWWJJWWJ.....",
-                "...SSJJJJWWJJWJWJJJJJ.....",
-                ".....JJJJJWJJWJWJJJJJ.....",
-                ".....JJJJJWJJWJWJJJJJ.....",
-                ".....JJJJWWWJWWWJJJJJ.....",
-            ],
-        ])
-
-    // MARK: 星球大战白兵（白盔黑 visor + 皱眉通气管 + 白色装甲）
-
-    static let trooperSheet = PixelSheet(
-        palette: ["A": rgb(0.96, 0.96, 0.97), "G": rgb(0.55, 0.57, 0.60), "D": rgb(0.30, 0.32, 0.35),
-                  "K": rgb(0.07, 0.07, 0.09), "W": .white, "B": rgb(0.40, 0.72, 0.98),
-                  "Y": rgb(0.95, 0.75, 0.20), "R": rgb(0.90, 0.35, 0.30), "C": rgb(0.35, 0.70, 0.90)],
-        frames: [
-            .idle: [
-                ".........AAAAAAAA.........",
-                ".......AAAAAGGAAAAA.......",
-                "......AAAAAAGGAAAAAA......",
-                ".....AAAGGAAAAAAGGAAA.....",
-                ".....AAAWKKAAAAWKKAAA.....",
-                ".....AAAKKKAAAAKKKAAA.....",
-                "......AAAAAKKKKAAAAA......",
-                "......AAAAAAKKAAAAAA......",
-                ".......AAAAAAAAAAAA.......",
-                "....GGAAAAAAAAAAAAAAGG....",
-                "..AA.AAAAAAAAAAAAAAAA.AA..",
-                "..AA.AAAGGAAAAAAGGAAA.AA..",
-                "......DDDDDDDDDDDDDD......",
-                ".......AAAAAAAAAAAA.......",
-                "........AAAAAAAAAA........",
-                "..........AAAAAA..........",
-                "...........AAAA...........",
-            ],
-            .working: [
-                ".........AAAAAAAA.........",
-                ".......AAAAAGGAAAAA.......",
-                "......AAAAAAGGAAAAAA......",
-                ".....AAAGGAAAAAAGGAAA.....",
-                ".....AAAWKKAAAAWKKAAA.....",
-                ".....AAAKKKAAAAKKKAAA.....",
-                "......AAAAAKKKKAAAAA......",
-                "......AAAAAAKKAAAAAA......",
-                ".......AAAAAAAAAAAA.......",
-                "....GGAAAAAAAAAAAAAAGG....",
-                ".....AAAAAAKKKAAAAAAA.....",
-                ".....AAKAAKKKKKKAAKAA.....",
-                "......DDDDDDKKDDDDDD......",
-                ".......AAAAAAAAAAAA.......",
-                "........AAAAAAAAAA........",
-                "..........AAAAAA..........",
-                "...........AAAA...........",
-            ],
-            .celebrate: [
-                ".........AAAAAAAA..R......",
-                ".Y.....AAAAAGGAAAAA.......",
-                "......AAAAAAGGAAAAAA......",
-                "C....AAAGGAAAAAAGGAAA.....",
-                ".....AAAAKAAAAAAKAAAA.....",
-                ".....AAAKAKAAAAKAKAAA.....",
-                "...AA.AAAAAKKKKAAAAA.AA...",
-                "...AA.AAAAAAKKAAAAAA.AA...",
-                "..AA...AAAAAAAAAAAA...AA..",
-                "..AAGGAAAAAAAAAAAAAAGGAA..",
-                ".....AAAAAAAAAAAAAAAA.....",
-                ".....AAAGGAAAAAAGGAAA.....",
-                "......DDDDDDDDDDDDDD......",
-                ".......AAAAAAAAAAAA.......",
-                "........AAAAAAAAAA........",
-                "..........AAAAAA..........",
-                "...........AAAA...........",
-            ],
-            .error: [
-                ".........AAAGAAAAA........",
-                ".......AAAAAGGAGAAA.......",
-                "......AAAAAAGGGAAAAA......",
-                ".....AAAGGAAAAAAGGAAA.B...",
-                ".....AAAKAKAAAAKAKAAA.....",
-                ".....AAAAKAAAAAAKAAAA.....",
-                "......AAAAAKKKKAAAAA......",
-                "......AAAAAAKKAAAAAA......",
-                ".......AAAAAAAAAAAA.......",
-                "....GGAAAAAAAAAAAAAAGG....",
-                "..AA.AAAAAAAAAAAAAAAA.AA..",
-                "..AA.AAAGGAAAAAAGGAAA.AA..",
-                "......DDDDDDDDDDDDDD......",
-                ".......AAAAAAAAAAAA.......",
-                "........AAAAAAAAAA........",
-                "..........AAAAAA..........",
-                "...........AAAA...........",
-            ],
-        ])
 }
 
 // MARK: - App 图标（跟随宠物皮肤）
@@ -1357,7 +1134,7 @@ final class PetPanelController {
     private var onDragEndHandler: ((NSPoint) -> Void)?
     private(set) var containerView: NSView!   // popover 锚点（v0.6 任务清单）
 
-    static let size = NSSize(width: 104, height: 110)   // v0.5.2 缩小 30%（原 148×158）
+    static let size = NSSize(width: 130, height: 136)   // v0.9 放大 25%（原 104×110），字更清楚
 
     init(savedOrigin: NSPoint?, onClick: @escaping () -> Void, onDragEnd: @escaping (NSPoint) -> Void) {
         onDragEndHandler = onDragEnd
@@ -1381,25 +1158,25 @@ final class PetPanelController {
             onDragEnd(self.baseOrigin)
         }
         container.wantsLayer = true
-        container.layer?.cornerRadius = 18
+        container.layer?.cornerRadius = 20
         container.layer?.backgroundColor = NSColor(white: 0.10, alpha: 0.72).cgColor
         container.layer?.masksToBounds = true
 
         emojiField = NSTextField(labelWithString: "😺")
-        emojiField.font = .systemFont(ofSize: 42)
+        emojiField.font = .systemFont(ofSize: 50)
         emojiField.alignment = .center
-        emojiField.frame = NSRect(x: 3, y: 44, width: 98, height: 58)
+        emojiField.frame = NSRect(x: 3, y: 50, width: 124, height: 72)
 
-        artView = NSImageView(frame: NSRect(x: 0, y: 40, width: 104, height: 68))
+        artView = NSImageView(frame: NSRect(x: 0, y: 46, width: 130, height: 84))
         artView.imageScaling = .scaleProportionallyUpOrDown   // 资产图 512²，等比缩到面板框
         artView.isHidden = true
 
         captionField = NSTextField(labelWithString: "启动中…")
-        captionField.font = .systemFont(ofSize: 11)
+        captionField.font = .systemFont(ofSize: 12.5)
         captionField.textColor = NSColor(white: 1.0, alpha: 0.92)
         captionField.alignment = .center
         captionField.lineBreakMode = .byTruncatingTail
-        captionField.frame = NSRect(x: 7, y: 20, width: 90, height: 22)
+        captionField.frame = NSRect(x: 7, y: 10, width: 116, height: 26)
 
         container.addSubview(artView)
         container.addSubview(emojiField)
@@ -1495,15 +1272,22 @@ final class PetPanelController {
 
     /// 眼神跟随：读全局鼠标位置，视向单位向量逐帧平滑逼近（自然扫视速度）；
     /// 鼠标贴近（~90pt 内）时 gazeGlow → 1，瞳孔微放大——蔚来 NOMI 式"靠近就注视你"。
-    /// 眼心屏幕坐标 = 面板中线偏上（artView 在面板上部，眼在画布中心上方）。
+    /// 鼠标远离（>380pt 渐进）后交给慢速漫游（双正弦叠加的游移视线），不死盯光标。
     private func updateGaze() {
         guard let panel else { return }
         let m = NSEvent.mouseLocation
         let eye = NSPoint(x: panel.frame.midX, y: panel.frame.midY + 30)
         let dx = m.x - eye.x, dy = m.y - eye.y
         let d = max((dx * dx + dy * dy).squareRoot(), 1)
-        PetArt.gaze.x += (CGFloat(dx / d) - PetArt.gaze.x) * 0.35
-        PetArt.gaze.y += (CGFloat(dy / d) - PetArt.gaze.y) * 0.35
+        let t = PetArt.ballTime
+        let wx = sin(t * 0.35) * 0.7 + sin(t * 0.13 + 1.7) * 0.3
+        let wy = sin(t * 0.21 + 0.8) * 0.35
+        let w = max(0, min(1, CGFloat((d - 380) / 320)))       // 380→700pt 混入漫游
+        let tx = CGFloat(dx / d) * (1 - w) + wx * w
+        let ty = CGFloat(dy / d) * (1 - w) + wy * w
+        let len = max((tx * tx + ty * ty).squareRoot(), 1)
+        PetArt.gaze.x += (tx / len - PetArt.gaze.x) * 0.35
+        PetArt.gaze.y += (ty / len - PetArt.gaze.y) * 0.35
         let near = max(0, 1 - (d - 90) / 260)
         PetArt.gazeGlow += (near - PetArt.gazeGlow) * 0.25
     }
@@ -2020,17 +1804,22 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
         menu.addItem(withTitle: "发条测试通知", action: #selector(testNotify), keyEquivalent: "").target = self
 
-        // 宠物造型子菜单：art 皮肤（矢量/像素画）用渲染缩略图当图标，emoji 兜底皮肤才用字符
+        // 宠物造型子菜单：art 皮肤（矢量）用渲染缩略图当图标（垫透明边距留出图文间距）
         let skinMenu = NSMenu(title: "宠物造型")
         for s in petSkins {
             let hasArt = s.art != nil
-            let item = NSMenuItem(title: hasArt ? "  \(s.name)" : "\(s.glyph)  \(s.name)",
+            let item = NSMenuItem(title: hasArt ? s.name : "\(s.glyph)  \(s.name)",
                                   action: #selector(selectSkin(_:)), keyEquivalent: "")
             item.target = self
             if hasArt {
-                let img = PetArt.image(skin: s, mode: .idle)
-                img.size = NSSize(width: 26, height: 17)   // 菜单行高内缩略图（位图 2x，Retina 清晰）
-                item.image = img
+                let pad = NSImage(size: NSSize(width: 36, height: 22))
+                pad.lockFocus()
+                let thumb = PetArt.image(skin: s, mode: .idle)
+                thumb.draw(in: NSRect(x: 5, y: 2.5, width: 26, height: 17),
+                           from: .zero, operation: .sourceOver, fraction: 1)
+                pad.unlockFocus()
+                pad.isTemplate = false
+                item.image = pad
             }
             item.representedObject = s.id
             item.state = (s.id == skin.id) ? .on : .off
