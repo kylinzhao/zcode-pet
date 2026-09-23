@@ -37,7 +37,9 @@
 //     idle 打呵欠（22~34s 一次）；樱木/恐龙/白兵下线（像素画引擎随之移除）。
 // v1.1 家族成型：AI 大头贴（mmx）因风格不一致观感廉价被移除；矢量家族新增
 //     咪咪(猫耳+摇尾)/兔兔(长耳)/幽幽(波浪裙边+悬浮)，全家族统一设计语言
-//     （同渐变/眼型/嘴型/动效）+ 接地软阴影 + 左上高光泽。图片资产通道保留待用。
+//     （同渐变/眼型/嘴型/动效）+ 接地软阴影 + 左上高光泽。
+// v1.1.1 画布适配：fitGeom 按形状头顶装饰高度自动整身缩放（猫 .77/兔 .75 级别），
+//     耳尖/呆毛不再超出 130×84 画布被裁；修接地阴影画到身体上方的问题。
 //
 // 构建：bash scripts/install.sh（编译进 .app bundle + ad-hoc 签名）；自检：--test。
 
@@ -569,6 +571,17 @@ enum PetArt {
         }
     }
 
+    /// 身体上/下沿（R 的倍数）：决定整身缩放——头顶装饰（耳/呆毛）与底部都要留在画布内
+    private static func fitGeom(_ shape: VectorShape) -> (top: CGFloat, bottom: CGFloat) {
+        switch shape {
+        case .round, .cat: return (1.30, 1.0)     // 猫取耳尖
+        case .egg:   return (1.22, 1.0)           // 呆毛
+        case .bunny: return (1.34, 1.0)           // 耳尖
+        case .onigiri, .ghost: return (0.99, 0.78)
+        case .gem:   return (0.94, 0.94)
+        }
+    }
+
     /// 猫耳轮廓（局部坐标，side = ±1，y 向上；画在身体后面，根部被头挡住）
     private static func catEar(_ side: CGFloat, _ R: CGFloat) -> NSBezierPath {
         let p = NSBezierPath()
@@ -587,16 +600,16 @@ enum PetArt {
     private static func drawBunnyEar(_ side: CGFloat, _ R: CGFloat, color: NSColor, inner: Bool) {
         NSGraphicsContext.current?.saveGraphicsState()
         let tr = NSAffineTransform()
-        tr.translateX(by: side * 0.34 * R, yBy: 0.98 * R)
+        tr.translateX(by: side * 0.30 * R, yBy: 0.86 * R)
         tr.rotate(byDegrees: side * 10)
         tr.concat()
         if inner {
             innerPink.setFill()
-            NSBezierPath(ovalIn: NSRect(x: -0.10 * R, y: -0.40 * R, width: 0.20 * R, height: 0.74 * R)).fill()
+            NSBezierPath(ovalIn: NSRect(x: -0.11 * R, y: -0.34 * R, width: 0.22 * R, height: 0.68 * R)).fill()
         } else {
             shade(color, 0.04).setFill()
             shade(color, -0.3).withAlphaComponent(0.5).setStroke()
-            let ear = NSBezierPath(ovalIn: NSRect(x: -0.19 * R, y: -0.52 * R, width: 0.38 * R, height: 1.04 * R))
+            let ear = NSBezierPath(ovalIn: NSRect(x: -0.21 * R, y: -0.48 * R, width: 0.42 * R, height: 0.96 * R))
             ear.lineWidth = 0.8
             ear.fill()
             ear.stroke()
@@ -610,7 +623,7 @@ enum PetArt {
     }
 
     static func drawVector(_ style: VectorStyle, _ mode: PetMode, in rect: NSRect) {
-        let R = min(rect.width, rect.height) / 2 - 2
+        let R0 = min(rect.width, rect.height) / 2 - 2
         let cy = rect.midY
         let color = bodyColor(style, mode)
         let breathe = 1 + 0.01 * sin(2 * .pi * 0.15 * ballTime)   // 呼吸 ±1%，锚在中心
@@ -618,17 +631,23 @@ enum PetArt {
         // 幽灵悬浮：慢速上下漂
         let hover: CGFloat = isGhost ? 0.5 + 0.5 * sin(2 * .pi * 0.45 * ballTime) : 0
 
+        // 整身缩放：头顶装饰与底部都留在画布内（fit 由形状的上/下沿决定）
+        let fit = fitGeom(style.shape)
+        let s = min(0.96, (cy - 2) / (fit.top * R0), (cy - 3) / (fit.bottom * R0))
+        let R = R0 * s
+
         // 接地软阴影（先画，在身体后面；幽灵悬浮越高影越淡）
-        let shadow = NSBezierPath(ovalIn: NSRect(x: rect.midX - 0.55 * R, y: cy + 0.86 * R,
-                                                 width: 1.10 * R, height: 0.14 * R))
+        let shadowCenterY = cy - fit.bottom * R + 1.5
+        let shadow = NSBezierPath(ovalIn: NSRect(x: rect.midX - 0.55 * R, y: shadowCenterY - 0.065 * R,
+                                                 width: 1.10 * R, height: 0.13 * R))
         NSColor.black.withAlphaComponent(0.13 * (1 - 0.55 * hover)).setFill()
         shadow.fill()
 
-        // 呼吸/悬浮变换包住整个身体与五官
+        // 呼吸/悬浮/整身缩放变换包住整个身体与五官
         NSGraphicsContext.current?.saveGraphicsState()
         let tr = NSAffineTransform()
-        tr.translateX(by: rect.midX, yBy: cy - hover * 0.06 * R)
-        tr.scaleX(by: 1, yBy: breathe)
+        tr.translateX(by: rect.midX, yBy: cy - hover * 0.04 * R)
+        tr.scaleX(by: s, yBy: s * breathe)
         tr.concat()
 
         // 身后装饰：猫耳 + 猫尾（渐变身体画在上面盖住根部）
