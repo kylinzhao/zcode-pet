@@ -33,10 +33,11 @@
 //     新增饭团（海苔）/菱菱（超椭圆菱）/蛋蛋（呆毛+腮红），海苔/呆毛/腮红为原创装饰；
 //     14 款 emoji 皮肤下线；眼神跟随鼠标（setEye lookX/lookY 语义）+ 邻近注视
 //     （鼠标贴近时瞳孔微放大，蔚来 NOMI 式反应）。
-// v1.0 全矢量 + 大头贴：面板放大 25%（130×136）字号加大；矢量脸新增嘴部表情与
-//     idle 打呵欠（22~34s 一次）；樱木/恐龙/白兵下线（像素画引擎随之移除），
-//     新增 mmx image-01 大头贴三角色——豚豚(水豚)/墨墨(章鱼)/菇菇(蘑菇)，
-//     白底出图 → 白底泛洪抠底 → 裁切 512²（daemon/assets/pet/，subject-ref 锁角色一致性）。
+// v1.0 全矢量：面板放大 25%（130×136）字号加大；矢量脸新增嘴部表情与
+//     idle 打呵欠（22~34s 一次）；樱木/恐龙/白兵下线（像素画引擎随之移除）。
+// v1.1 家族成型：AI 大头贴（mmx）因风格不一致观感廉价被移除；矢量家族新增
+//     咪咪(猫耳+摇尾)/兔兔(长耳)/幽幽(波浪裙边+悬浮)，全家族统一设计语言
+//     （同渐变/眼型/嘴型/动效）+ 接地软阴影 + 左上高光泽。图片资产通道保留待用。
 //
 // 构建：bash scripts/install.sh（编译进 .app bundle + ad-hoc 签名）；自检：--test。
 
@@ -270,8 +271,8 @@ struct PetSkin {
     }
 }
 
-// v0.9：纯 emoji 皮肤下线——菜单只留矢量动画家族（4）+ mmx 大头贴（3）。
-// emoji 字段仅作资产加载失败时的最后兜底显示。
+// v0.9：纯 emoji 皮肤下线。
+// emoji 字段仅作渲染失败时的最后兜底显示。
 let petSkins: [PetSkin] = [
     .init(id: "ball", name: "球球", idle: "⚪", working: "🔵", celebrate: "🟡", error: "🔴",
           art: PetArt.vectorPet(.init(shape: .round)), animated: true),
@@ -287,9 +288,17 @@ let petSkins: [PetSkin] = [
           art: PetArt.vectorPet(.init(shape: .egg,
                                       idleColor: NSColor(srgbRed: 0xF6 / 255, green: 0xD6 / 255, blue: 0x8C / 255, alpha: 1),
                                       ahoge: true, blush: true)), animated: true),
-    .init(id: "capybara", name: "豚豚", idle: "🦫", working: "🦫", celebrate: "🎉", error: "😵", asset: true),
-    .init(id: "octopus", name: "墨墨", idle: "🐙", working: "🐙", celebrate: "🎉", error: "😵", asset: true),
-    .init(id: "mushroom", name: "菇菇", idle: "🍄", working: "🍄", celebrate: "🎉", error: "😵", asset: true),
+    .init(id: "cat", name: "咪咪", idle: "🐱", working: "🐱", celebrate: "🎉", error: "😵",
+          art: PetArt.vectorPet(.init(shape: .cat,
+                                      idleColor: NSColor(srgbRed: 0xF5 / 255, green: 0xC0 / 255, blue: 0x83 / 255, alpha: 1))), animated: true),
+    .init(id: "bunny", name: "兔兔", idle: "🐰", working: "🐰", celebrate: "🎉", error: "😵",
+          art: PetArt.vectorPet(.init(shape: .bunny,
+                                      idleColor: NSColor(srgbRed: 0xF7 / 255, green: 0xF1 / 255, blue: 0xEE / 255, alpha: 1),
+                                      blush: true)), animated: true),
+    .init(id: "ghost", name: "幽幽", idle: "👻", working: "👻", celebrate: "🎉", error: "😵",
+          art: PetArt.vectorPet(.init(shape: .ghost,
+                                      idleColor: NSColor(srgbRed: 0xE9 / 255, green: 0xE5 / 255, blue: 0xF4 / 255, alpha: 1),
+                                      blush: true)), animated: true),
 ]
 
 func currentSkin() -> PetSkin {
@@ -380,8 +389,8 @@ enum PetArt {
     //   眨眼 = 间隔 6~14s 随机，合上 → 停 70ms → 过冲 1.08 → 300ms 落回 1
     //   呼吸 = 纵向 ±1%（breathe 0.01）
     //   眼神跟随 = setEye 的 lookX/lookY 语义：眼心向鼠标方向平移（本项目扩展了邻近注视/远处漫游）
-    // 形状家族沿用其 blob（圆）/ wedge（三角）/ gem（菱形）三体型的思路独立绘制；
-    // 饭团的海苔、蛋蛋的呆毛与腮红、嘴部表情与打呵欠为本项目原创。
+    // 全家族统一设计语言：同渐变、同眼型、同嘴型、同动效——角色差异只在于轮廓与装饰
+    // （耳/尾/海苔/呆毛/腮红/裙边，均为本项目原创）；接地软阴影 + 左上高光泽提升质感。
     // 情绪体色：idle 各显个性色，working 静心蓝 / celebrate 暖金 / error 珊瑚红家族统一
     // （后三色取自其官网彩带调色板）。
 
@@ -395,6 +404,9 @@ enum PetArt {
         case onigiri    // 饭团：圆角三角 + 海苔
         case gem        // 菱菱：圆润菱形（超椭圆 n<2）
         case egg        // 蛋蛋：竖椭圆 + 呆毛
+        case cat        // 咪咪：圆头 + 猫耳 + 摇尾
+        case bunny      // 兔兔：微长圆 + 长耳
+        case ghost      // 幽幽：圆顶 + 波浪裙边，悬浮
     }
 
     struct VectorStyle {
@@ -406,6 +418,7 @@ enum PetArt {
     }
 
     private static let ballInk = NSColor(srgbRed: 0x1A / 255, green: 0x1A / 255, blue: 0x1A / 255, alpha: 1)
+    private static let innerPink = NSColor(srgbRed: 0xF2 / 255, green: 0xB8 / 255, blue: 0xC6 / 255, alpha: 0.9)
     private static let moodWorking = NSColor(srgbRed: 0x7F / 255, green: 0xA8 / 255, blue: 0xEE / 255, alpha: 1)
     private static let moodCelebrate = NSColor(srgbRed: 0xF5 / 255, green: 0xB1 / 255, blue: 0x3F / 255, alpha: 1)
     private static let moodError = NSColor(srgbRed: 0xF9 / 255, green: 0x70 / 255, blue: 0x5C / 255, alpha: 1)
@@ -494,12 +507,34 @@ enum PetArt {
     /// 身体轮廓（局部坐标，中心 (0,0)，R = 名义半径）
     private static func bodyPath(_ shape: VectorShape, R: CGFloat) -> NSBezierPath {
         switch shape {
-        case .round:
+        case .round, .cat:
             return NSBezierPath(ovalIn: NSRect(x: -R, y: -R, width: 2 * R, height: 2 * R))
         case .egg:
             return NSBezierPath(ovalIn: NSRect(x: -0.80 * R, y: -R, width: 1.60 * R, height: 2 * R))
+        case .bunny:
+            return NSBezierPath(ovalIn: NSRect(x: -0.85 * R, y: -R, width: 1.70 * R, height: 2 * R))
         case .gem:
             return superellipse(a: R, b: 0.94 * R, n: 1.4)
+        case .ghost:
+            // 圆顶 + 三段波浪裙边（裙边朝下）
+            let p = NSBezierPath()
+            let w: CGFloat = 1.70 * R / 3
+            p.move(to: NSPoint(x: -0.85 * R, y: -0.30 * R))
+            p.curve(to: NSPoint(x: 0, y: R),
+                    controlPoint1: NSPoint(x: -0.92 * R, y: 0.52 * R),
+                    controlPoint2: NSPoint(x: -0.56 * R, y: R))
+            p.curve(to: NSPoint(x: 0.85 * R, y: -0.30 * R),
+                    controlPoint1: NSPoint(x: 0.56 * R, y: R),
+                    controlPoint2: NSPoint(x: 0.92 * R, y: 0.52 * R))
+            var x = 0.85 * R
+            for _ in 0..<3 {
+                p.curve(to: NSPoint(x: x - w, y: -0.30 * R),
+                        controlPoint1: NSPoint(x: x - w * 0.25, y: -0.78 * R),
+                        controlPoint2: NSPoint(x: x - w * 0.75, y: -0.78 * R))
+                x -= w
+            }
+            p.close()
+            return p
         case .onigiri:
             // 圆顶三角（饭团）：圆顶弧 + 微内凹侧边 + 圆角平底
             let p = NSBezierPath()
@@ -525,11 +560,48 @@ enum PetArt {
     /// 形状相关的脸部参数：眼缩放 / 眼心高度 / 两眼中心距（越窄的脸眼睛越靠中、越小）
     private static func faceGeom(_ shape: VectorShape, R: CGFloat) -> (scale: CGFloat, eyeY: CGFloat, gap: CGFloat) {
         switch shape {
-        case .round: return (1.00, 0.46 * R, 0.43 * R)
+        case .round, .cat: return (0.95, 0.42 * R, 0.40 * R)
         case .egg:   return (0.92, 0.40 * R, 0.40 * R)
+        case .bunny: return (0.88, 0.38 * R, 0.36 * R)
         case .onigiri: return (0.85, 0.06 * R, 0.38 * R)
+        case .ghost: return (0.85, 0.12 * R, 0.38 * R)
         case .gem:   return (0.78, 0.16 * R, 0.34 * R)
         }
+    }
+
+    /// 猫耳轮廓（局部坐标，side = ±1，y 向上；画在身体后面，根部被头挡住）
+    private static func catEar(_ side: CGFloat, _ R: CGFloat) -> NSBezierPath {
+        let p = NSBezierPath()
+        p.move(to: NSPoint(x: side * 0.26 * R, y: 0.68 * R))
+        p.curve(to: NSPoint(x: side * 0.58 * R, y: 1.30 * R),
+                controlPoint1: NSPoint(x: side * 0.30 * R, y: 1.06 * R),
+                controlPoint2: NSPoint(x: side * 0.42 * R, y: 1.28 * R))
+        p.curve(to: NSPoint(x: side * 0.78 * R, y: 0.40 * R),
+                controlPoint1: NSPoint(x: side * 0.74 * R, y: 1.10 * R),
+                controlPoint2: NSPoint(x: side * 0.84 * R, y: 0.72 * R))
+        p.close()
+        return p
+    }
+
+    /// 兔耳（局部坐标，side = ±1，y 向上）：微外撇的长椭圆
+    private static func drawBunnyEar(_ side: CGFloat, _ R: CGFloat, color: NSColor, inner: Bool) {
+        NSGraphicsContext.current?.saveGraphicsState()
+        let tr = NSAffineTransform()
+        tr.translateX(by: side * 0.34 * R, yBy: 0.98 * R)
+        tr.rotate(byDegrees: side * 10)
+        tr.concat()
+        if inner {
+            innerPink.setFill()
+            NSBezierPath(ovalIn: NSRect(x: -0.10 * R, y: -0.40 * R, width: 0.20 * R, height: 0.74 * R)).fill()
+        } else {
+            shade(color, 0.04).setFill()
+            shade(color, -0.3).withAlphaComponent(0.5).setStroke()
+            let ear = NSBezierPath(ovalIn: NSRect(x: -0.19 * R, y: -0.52 * R, width: 0.38 * R, height: 1.04 * R))
+            ear.lineWidth = 0.8
+            ear.fill()
+            ear.stroke()
+        }
+        NSGraphicsContext.current?.restoreGraphicsState()
     }
 
     /// art 闭包工厂：petSkins 条目用
@@ -539,25 +611,75 @@ enum PetArt {
 
     static func drawVector(_ style: VectorStyle, _ mode: PetMode, in rect: NSRect) {
         let R = min(rect.width, rect.height) / 2 - 2
+        let cy = rect.midY
         let color = bodyColor(style, mode)
         let breathe = 1 + 0.01 * sin(2 * .pi * 0.15 * ballTime)   // 呼吸 ±1%，锚在中心
+        let isGhost = style.shape == .ghost
+        // 幽灵悬浮：慢速上下漂
+        let hover: CGFloat = isGhost ? 0.5 + 0.5 * sin(2 * .pi * 0.45 * ballTime) : 0
 
-        // 呼吸纵向缩放包住整个身体与五官
+        // 接地软阴影（先画，在身体后面；幽灵悬浮越高影越淡）
+        let shadow = NSBezierPath(ovalIn: NSRect(x: rect.midX - 0.55 * R, y: cy + 0.86 * R,
+                                                 width: 1.10 * R, height: 0.14 * R))
+        NSColor.black.withAlphaComponent(0.13 * (1 - 0.55 * hover)).setFill()
+        shadow.fill()
+
+        // 呼吸/悬浮变换包住整个身体与五官
         NSGraphicsContext.current?.saveGraphicsState()
         let tr = NSAffineTransform()
-        tr.translateX(by: rect.midX, yBy: rect.midY)
+        tr.translateX(by: rect.midX, yBy: cy - hover * 0.06 * R)
         tr.scaleX(by: 1, yBy: breathe)
         tr.concat()
 
+        // 身后装饰：猫耳 + 猫尾（渐变身体画在上面盖住根部）
+        if case .cat = style.shape {
+            let tailWag = sin(2 * .pi * (mode == .working ? 0.8 : 0.22) * ballTime) * (mode == .idle ? 10 : 4)
+            NSGraphicsContext.current?.saveGraphicsState()
+            let tw = NSAffineTransform()
+            tw.translateX(by: 0.74 * R, yBy: -0.10 * R)
+            tw.rotate(byDegrees: tailWag)
+            tw.translateX(by: -0.74 * R, yBy: 0.10 * R)
+            tw.concat()
+            let tail = NSBezierPath()
+            tail.move(to: NSPoint(x: 0.74 * R, y: -0.10 * R))
+            tail.curve(to: NSPoint(x: 1.24 * R, y: 0.30 * R),
+                       controlPoint1: NSPoint(x: 1.06 * R, y: -0.02 * R),
+                       controlPoint2: NSPoint(x: 1.26 * R, y: 0.12 * R))
+            tail.curve(to: NSPoint(x: 0.96 * R, y: 0.88 * R),
+                       controlPoint1: NSPoint(x: 1.24 * R, y: 0.52 * R),
+                       controlPoint2: NSPoint(x: 1.14 * R, y: 0.74 * R))
+            shade(color, -0.06).setStroke()
+            tail.lineWidth = 0.17 * R
+            tail.lineCapStyle = .round
+            tail.stroke()
+            NSGraphicsContext.current?.restoreGraphicsState()
+            for side in [-1.0, 1.0] {
+                let ear = catEar(side, R)
+                shade(color, 0.04).setFill()
+                ear.fill()
+                shade(color, -0.3).withAlphaComponent(0.5).setStroke()
+                ear.lineWidth = 0.8
+                ear.stroke()
+            }
+        }
+        if case .bunny = style.shape {
+            for side in [-1.0, 1.0] { drawBunnyEar(side, R, color: color, inner: false) }
+        }
+
         let body = bodyPath(style.shape, R: R)
 
-        // 三段径向渐变，焦点在左上（官网 cx 38% / cy 32%，AppKit y 向上 → 68%）
+        // 三段径向渐变 + 左上高光泽，焦点在左上（官网 cx 38% / cy 32%，AppKit y 向上 → 68%）
         NSGraphicsContext.current?.saveGraphicsState()
         body.addClip()
         let focus = NSPoint(x: -0.24 * R, y: 0.36 * R)
         if let grad = NSGradient(colors: [shade(color, 0.22), color, shade(color, -0.12)],
                                  atLocations: [0, 0.62, 1], colorSpace: .sRGB) {
             grad.draw(fromCenter: focus, radius: 0, toCenter: focus, radius: 1.5 * R, options: [])
+        }
+        if let gloss = NSGradient(colors: [NSColor.white.withAlphaComponent(0.42),
+                                           NSColor.white.withAlphaComponent(0)]) {
+            gloss.draw(fromCenter: NSPoint(x: -0.30 * R, y: 0.46 * R), radius: 0,
+                       toCenter: NSPoint(x: -0.30 * R, y: 0.46 * R), radius: 0.52 * R, options: [])
         }
         // 饭团海苔：身体 clip 内的底部圆角深绿块
         if style.nori {
@@ -581,6 +703,27 @@ enum PetArt {
             ah.lineCapStyle = .round
             shade(color, -0.25).setStroke()
             ah.stroke()
+        }
+        // 猫耳内耳 / 兔耳内耳（画在身体之上，落在耳尖区域）
+        if case .cat = style.shape {
+            for side in [-1.0, 1.0] {
+                // 内耳 = 耳朵轮廓向质心收缩的小一号耳形
+                let c = NSPoint(x: side * 0.52 * R, y: 0.78 * R)
+                let inner = NSBezierPath()
+                inner.move(to: NSPoint(x: c.x + (side * 0.26 * R - c.x) * 0.55, y: c.y + (0.68 * R - c.y) * 0.55))
+                inner.curve(to: NSPoint(x: c.x + (side * 0.58 * R - c.x) * 0.55, y: c.y + (1.22 * R - c.y) * 0.55),
+                            controlPoint1: NSPoint(x: c.x + (side * 0.30 * R - c.x) * 0.55, y: c.y + (1.00 * R - c.y) * 0.55),
+                            controlPoint2: NSPoint(x: c.x + (side * 0.42 * R - c.x) * 0.55, y: c.y + (1.20 * R - c.y) * 0.55))
+                inner.curve(to: NSPoint(x: c.x + (side * 0.76 * R - c.x) * 0.55, y: c.y + (0.48 * R - c.y) * 0.55),
+                            controlPoint1: NSPoint(x: c.x + (side * 0.72 * R - c.x) * 0.55, y: c.y + (1.04 * R - c.y) * 0.55),
+                            controlPoint2: NSPoint(x: c.x + (side * 0.82 * R - c.x) * 0.55, y: c.y + (0.70 * R - c.y) * 0.55))
+                inner.close()
+                innerPink.setFill()
+                inner.fill()
+            }
+        }
+        if case .bunny = style.shape {
+            for side in [-1.0, 1.0] { drawBunnyEar(side, R, color: color, inner: true) }
         }
 
         let g = faceGeom(style.shape, R: R)
