@@ -9,7 +9,7 @@
 😿 任务出错了 ⚠️            ← 有任务失败（颤抖动画 + 必须点掉的弹窗）
 ```
 
-菜单栏 `🐾 N 📬M`：N = 执行中任务数，M = 未读完成数。下拉可看清单（**点击直达对应工作区**）、切换 18 款皮肤——14 款 emoji（猫/狗/熊猫/企鹅/火箭/机器人/幽灵…）+ 3 款手绘（**樱木花道、恐龙、白兵**：MiniMax image-01 生成的贴纸风立绘，四种状态各一个姿势，像素画作离线兜底）+ **球球**（emotion-ball 风格矢量渐变圆：会眨眼会呼吸，四种状态换情绪体色，idle 米白 / working 静心蓝 / celebrate 暖金 / error 珊瑚红）、静音。
+菜单栏 `🐾 N 📬M`：N = 执行中任务数，M = 未读完成数。下拉可看清单（**点击直达对应工作区**）、切换 7 款皮肤——**矢量动画家族 4 款**（球球/饭团/菱菱/蛋蛋：emotion-ball 风格渐变脸，会眨眼、呼吸、**眼神跟随鼠标**，鼠标贴近时瞳孔放大注视你；四种状态换情绪体色 米白/静心蓝/暖金/珊瑚红）+ **手绘贴纸 3 款**（樱木花道/恐龙/白兵：MiniMax image-01 生成，像素画作离线兜底）、静音。
 
 ## 功能
 
@@ -54,7 +54,7 @@ bash scripts/install.sh
 ## 日常使用
 
 - **点宠物** = 跳回 ZCode；**按住拖动** = 挪位置（自动记忆）
-- **菜单栏 🐾**：执行中/未读清单（点击直达）、宠物造型（18 款皮肤）、静音 30 分钟、Stop hook 心跳、退出
+- **菜单栏 🐾**：执行中/未读清单（点击直达）、宠物造型（7 款皮肤，矢量家族带缩略图）、静音 30 分钟、Stop hook 心跳、退出
 - **改配置**（可选）：`~/.zcode-pet/config.json`
 
 ```json
@@ -119,9 +119,11 @@ bash scripts/install.sh    # 改 daemon/main.swift 后重跑即重新编译部�
   `Resources/pet-art/`；像素画为 26×17 字符矩阵（`PetArt`），改完可
   `~/.zcode-pet/zcode-pet.app/Contents/MacOS/zcode-pet-daemon --render-art /tmp/pet-art`
   导出 PNG 自检（含行宽校验）
-- **球球**（`animated` 皮肤）：纯矢量 CoreGraphics 绘制（`PetArt.ball`），不走资产/像素矩阵；
-  由 12fps tick 逐帧重绘实现眨眼（6~14s 随机、过冲回弹）与呼吸。形象参数参考
-  [emotion-ball-desktop-pet](https://github.com/dreamcall520/emotion-ball-desktop-pet)
+- **球球一族**（`animated` 皮肤）：纯矢量 CoreGraphics 绘制（`PetArt.drawVector`），不走资产/像素矩阵；
+  由 12fps tick 逐帧重绘实现眨眼（6~14s 随机、过冲回弹）、呼吸（±1%）与**眼神跟随**（读全局鼠标，
+  视向平滑逼近；贴近 ~90pt 内瞳孔微放大）。形状家族沿其 blob/wedge/gem 三体型思路：球球（圆）、
+  饭团（圆角三角 + 海苔）、菱菱（超椭圆 n=1.4 菱形 + 腮红）、蛋蛋（竖椭圆 + 呆毛 + 腮红）。
+  基础画法参数参考 [emotion-ball-desktop-pet](https://github.com/dreamcall520/emotion-ball-desktop-pet)
   网页演示的渲染源码独立实现（角色原作者 sam70331，免费非商用需署名）
 
 MIT License
