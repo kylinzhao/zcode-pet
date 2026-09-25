@@ -1195,6 +1195,9 @@ final class TaskListPopover {
 
     func close() { popover.performClose(nil) }
 
+    /// 清单弹出期间宠物要钉住不动——弹窗锚点跟着浮动动画晃没法点
+    var shown: Bool { popover.isShown }
+
     private func buildView(running: [(title: String, id: String, ws: String)],
                            unread: [TaskRow],
                            target: AnyObject, action: Selector) -> NSView {
@@ -1416,6 +1419,8 @@ final class PetPanelController {
         phase += 1.0 / 12.0
         let dt: CGFloat = 1.0 / 12.0
         PetArt.ballTime += dt
+        // 悬停检测提前：既驱动摸头计量，也决定窗口是否钉住
+        let overPet = panel.frame.insetBy(dx: -8, dy: -8).contains(NSEvent.mouseLocation)
 
         PetArt.workTier = mode == .working ? (runningCount >= 4 ? 3 : max(1, runningCount)) : 0
         PetArt.impatience = mode == .working
@@ -1437,7 +1442,7 @@ final class PetPanelController {
             .truncatingRemainder(dividingBy: 1)
 
         // 摸头：鼠标停在宠物身上 ~1 秒成形，离开快退
-        if mode == .idle, panel.frame.insetBy(dx: -8, dy: -8).contains(NSEvent.mouseLocation) {
+        if mode == .idle && overPet {
             patMeter = min(1, patMeter + dt / 0.9)
         } else {
             patMeter = max(0, patMeter - dt * 2.5)
@@ -1481,7 +1486,14 @@ final class PetPanelController {
         if mode == .idle { dy += 2.5 * sin(.pi * (1 - PetArt.relief)) }
         var dx: CGFloat = 0
         if mode == .working, PetArt.workTier >= 3 { dx = CGFloat(sin(phase * 2 * .pi * 4.7)) * 1.5 }
-        panel.setFrameOrigin(NSPoint(x: baseOrigin.x + dx, y: baseOrigin.y + dy))
+        // 鼠标悬停在宠物上 / 任务清单弹出期间钉住窗口：点击要好点、弹窗锚点不能跟着晃。
+        // 进入钉住时把浮动相位归零，松开后从 sin(0)=0 平滑接回，不跳变
+        if overPet || TaskListPopover.shared.shown {
+            bobPhase = 0
+            if panel.frame.origin != baseOrigin { panel.setFrameOrigin(baseOrigin) }
+        } else {
+            panel.setFrameOrigin(NSPoint(x: baseOrigin.x + dx, y: baseOrigin.y + dy))
+        }
         // 矢量动画皮肤（球球一族）：眼神跟随 + 眨眼/呼吸逐帧重画。208×136 位图 12fps，开销可忽略
         if let skin = activeSkin, skin.animated, !artView.isHidden {
             updateGaze(mode: mode)
