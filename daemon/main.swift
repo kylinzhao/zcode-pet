@@ -44,6 +44,10 @@
 //     且点击无法落到正确窗口。任务完成/出错只靠宠物本体浮窗提示：celebrate/error
 //     动画 + 常驻未读角标（菜单栏 📬M + 「N 未读」文案 + 清单）。静音、UN 测试链路、
 //     任务结果面板（读 cli 消息库）随通知一并移除（唯一入口是通知点击，无入口即死代码）。
+// v1.3 状态鲜活：① 困倦系统——空闲且鼠标不在旁边时困意累积（约 4 分钟攒满），眼皮渐垂、
+//     呵欠随困意加密（22~34s → 8~13s），困极打盹冒 Zzz；来任务或鼠标靠近即快速清醒。
+//     ② 忙碌分级——按执行中任务数分三档：1 个专注（轻眯眼慢浮）、2~3 个并行（快浮 +
+//     视线扫两块屏幕 + 甩汗滴）、4+ 忙翻（急促小抖 + 瞪眼乱瞟 + 双汗滴 + 波浪嘴，体色同族加深）。
 //
 // 构建：bash scripts/install.sh（编译进 .app bundle + ad-hoc 签名）；自检：--test。
 
@@ -272,18 +276,33 @@ enum PetArt {
         return rep
     }
 
-    /// --render-art：导出全部手绘皮肤的 4 种状态 + 图标效果 PNG，返回失败数
+    /// --render-art：导出全部手绘皮肤的基础 4 态 + 忙碌 2/3 档 + 困倦打盹帧 + 图标 PNG，返回失败数
     @discardableResult
     static func exportAll(to dir: String) -> Int32 {
         try? FileManager.default.createDirectory(atPath: dir, withIntermediateDirectories: true)
         var failures = 0
         for skin in petSkins where skin.art != nil {
-            for mode in [PetMode.idle, .working, .celebrate, .error] {
+            func emit(_ suffix: String, _ mode: PetMode) {
                 let png = bitmap(skin: skin, mode: mode, scale: 4).representation(using: .png, properties: [:])
-                let path = (dir as NSString).appendingPathComponent("\(skin.id)-\(modeName(mode)).png")
+                let path = (dir as NSString).appendingPathComponent("\(skin.id)-\(suffix).png")
                 if let png {
                     do { try png.write(to: URL(fileURLWithPath: path)) } catch { failures += 1 }
                 } else { failures += 1 }
+            }
+            for mode in [PetMode.idle, .working, .celebrate, .error] {
+                emit(modeName(mode), mode)
+                if mode == .working {
+                    workTier = 2; ballTime = 0.825   // 汗滴甩到半程（3 档两滴同框）、视线扫向一侧
+                    emit("working2", mode)
+                    workTier = 3
+                    emit("working3", mode)
+                    workTier = 0; ballTime = 0
+                }
+                if mode == .idle {
+                    drowsiness = 1; ballTime = 10.2  // 呵欠顶点 + Zzz
+                    emit("sleepy", mode)
+                    drowsiness = 0; ballTime = 0
+                }
             }
             let iconPath = (dir as NSString).appendingPathComponent("\(skin.id)-icon.png")
             if !AppIconManager.renderIconPNG(skin: skin, pixels: 512, to: URL(fileURLWithPath: iconPath)) { failures += 1 }
@@ -320,6 +339,8 @@ enum PetArt {
     static var ballTime: CGFloat = 0
     static var gaze = CGPoint.zero     // 平滑后的视向（近似单位向量，右/上为正）
     static var gazeGlow: CGFloat = 0   // 鼠标邻近度 0..1：贴近时瞳孔微放大（注视感）
+    static var workTier = 0            // 忙碌档位 0..3（0=非执行中；1 专注 / 2 并行 / 3 忙翻）
+    static var drowsiness: CGFloat = 0 // 困倦度 0..1（空闲渐涨，来任务/鼠标靠近消退）
 
     enum VectorShape {
         case round      // 球球：正圆
@@ -393,12 +414,13 @@ enum PetArt {
         return 1
     }
 
-    /// t 秒的呵欠幅度 0..1：每 22~34s 一次（仅 idle 用），2.6s 序列 = 张开 0.7s → 保持 1s → 闭合 0.9s
+    /// t 秒的呵欠幅度 0..1：仅 idle 用，2.6s 序列 = 张开 0.7s → 保持 1s → 闭合 0.9s。
+    /// 间隔随困意缩水：精神时 22~34s 一次，困极 8~13s 一次（长时间没活干越打越频）
     static func yawnAmount(_ t: CGFloat) -> CGFloat {
         var start: CGFloat = 9.0
         var k = 0
         while k < 10000 {
-            let gap: CGFloat = 22 + ballHash(k &+ 913) * 12
+            let gap: CGFloat = (22 + ballHash(k &+ 913) * 12) * (1 - 0.62 * drowsiness)
             if start + gap > t { break }
             start += gap
             k += 1
@@ -545,7 +567,9 @@ enum PetArt {
     static func drawVector(_ style: VectorStyle, _ mode: PetMode, in rect: NSRect) {
         let R0 = min(rect.width, rect.height) / 2 - 2
         let cy = rect.midY
-        let color = bodyColor(style, mode)
+        var color = bodyColor(style, mode)
+        let tier = mode == .working ? max(1, workTier) : 0
+        if tier >= 3 { color = shade(color, -0.10) }   // 忙翻：体色同族加深一档
         let breathe = 1 + 0.01 * sin(2 * .pi * 0.15 * ballTime)   // 呼吸 ±1%，锚在中心
         let isGhost = style.shape == .ghost
         // 幽灵悬浮：慢速上下漂
@@ -719,12 +743,20 @@ enum PetArt {
                                             width: eyeW, height: h)).fill()
             }
         default:
-            // 睁眼（idle / working）：竖椭圆 × 眨眼开合度；working 专注微眯；idle 呵欠时挤眯
+            // 睁眼（idle / working）：竖椭圆 × 眨眼开合度；working 按档位眯眼/瞪眼；
+            // idle 困时眼皮渐垂，呵欠时挤眯
             var open = blinkOpenness(ballTime)
             var ey = g.eyeY
             let yawn: CGFloat = mode == .idle ? yawnAmount(ballTime) : 0
             open *= 1 - 0.75 * yawn
-            if case .working = mode { open *= 0.85; ey += eyeH * 0.12 }
+            if drowsiness > 0 { open *= 1 - 0.42 * drowsiness }
+            if tier >= 3 {
+                open *= 1.12                                   // 忙翻：瞪大眼
+            } else if tier == 2 {
+                open *= 0.68; ey += eyeH * 0.10                // 并行：专注眯眼
+            } else if tier == 1 {
+                open *= 0.85; ey += eyeH * 0.12                // 单线程：轻眯
+            }
             let h = max(eyeH * open, 1.1)                          // 闭合时留一条线
             ballInk.setFill()
             for side in [-1.0, 1.0] {
@@ -755,10 +787,19 @@ enum PetArt {
             ballInk.setStroke()
             mouth.stroke()
         case .working:
-            // 认真抿嘴：短平线
-            mouth.move(to: NSPoint(x: -mouthW * 0.7, y: mouthY))
-            mouth.line(to: NSPoint(x: mouthW * 0.7, y: mouthY))
-            mouth.lineWidth = 0.04 * R
+            if tier >= 3 {
+                // 忙翻：绷紧的波浪嘴
+                mouth.move(to: NSPoint(x: -mouthW * 0.95, y: mouthY))
+                mouth.curve(to: NSPoint(x: mouthW * 0.95, y: mouthY),
+                            controlPoint1: NSPoint(x: -mouthW * 0.3, y: mouthY - 0.05 * R),
+                            controlPoint2: NSPoint(x: mouthW * 0.3, y: mouthY + 0.05 * R))
+                mouth.lineWidth = 0.045 * R
+            } else {
+                // 专注抿嘴：短平线
+                mouth.move(to: NSPoint(x: -mouthW * 0.7, y: mouthY))
+                mouth.line(to: NSPoint(x: mouthW * 0.7, y: mouthY))
+                mouth.lineWidth = 0.04 * R
+            }
             ballInk.setStroke()
             mouth.stroke()
         case .idle:
@@ -771,18 +812,55 @@ enum PetArt {
                                             width: mouthW * 2 * (0.6 + 0.4 * yawn),
                                             height: 0.22 * R * yawn)).fill()
             } else {
-                // 微笑：下弯浅弧
+                // 微笑：下弯浅弧（越困越抿平）
+                let smile = 1 - 0.6 * drowsiness
                 mouth.move(to: NSPoint(x: -mouthW * 0.8, y: mouthY + 0.03 * R))
                 mouth.curve(to: NSPoint(x: mouthW * 0.8, y: mouthY + 0.03 * R),
-                            controlPoint1: NSPoint(x: -mouthW * 0.3, y: mouthY - 0.035 * R),
-                            controlPoint2: NSPoint(x: mouthW * 0.3, y: mouthY - 0.035 * R))
+                            controlPoint1: NSPoint(x: -mouthW * 0.3, y: mouthY - 0.035 * R * smile),
+                            controlPoint2: NSPoint(x: mouthW * 0.3, y: mouthY - 0.035 * R * smile))
                 mouth.lineWidth = 0.045 * R
                 ballInk.setStroke()
                 mouth.stroke()
             }
         }
 
+        // 忙碌汗滴：太阳穴甩出一滴汗滑落消散（并行 1 滴，忙翻两滴轮抛）
+        if tier >= 2 {
+            let period: CGFloat = tier >= 3 ? 1.1 : 1.8
+            let drops = tier >= 3 ? 2 : 1
+            for i in 0..<drops {
+                let u = (ballTime / period + CGFloat(i) / CGFloat(drops)).truncatingRemainder(dividingBy: 1)
+                let side: CGFloat = i == 0 ? 1 : -1
+                let x = side * (0.72 + 0.16 * u) * R
+                let y = (0.50 - 0.46 * u) * R
+                let drop = NSBezierPath()
+                drop.move(to: NSPoint(x: x, y: y + 0.09 * R))          // 上尖下圆的泪滴形
+                drop.curve(to: NSPoint(x: x, y: y - 0.07 * R),
+                           controlPoint1: NSPoint(x: x + 0.085 * R, y: y + 0.01 * R),
+                           controlPoint2: NSPoint(x: x + 0.085 * R, y: y - 0.07 * R))
+                drop.curve(to: NSPoint(x: x, y: y + 0.09 * R),
+                           controlPoint1: NSPoint(x: x - 0.085 * R, y: y - 0.07 * R),
+                           controlPoint2: NSPoint(x: x - 0.085 * R, y: y + 0.01 * R))
+                NSColor(srgbRed: 0.75, green: 0.89, blue: 0.97, alpha: 0.85 * sin(.pi * u)).setFill()
+                drop.fill()
+            }
+        }
+        // 困极打盹：右上角 z 依次升起、变大、消散——画在画布层用浅墨
+        // （面板底是深色圆角卡；放在身体变换外也不与任何体型/装饰重叠）
+
         NSGraphicsContext.current?.restoreGraphicsState()
+
+        if mode == .idle && drowsiness > 0.8 {
+            let fade = (drowsiness - 0.8) / 0.2
+            for i in 0..<3 {
+                let u = (ballTime * 0.22 + CGFloat(i) / 3).truncatingRemainder(dividingBy: 1)
+                let str = NSAttributedString(string: "z", attributes: [
+                    .font: NSFont.systemFont(ofSize: 7 + 6 * u, weight: .bold),
+                    .foregroundColor: NSColor.white.withAlphaComponent(0.62 * sin(.pi * u) * fade),
+                ])
+                str.draw(at: NSPoint(x: rect.maxX - 30 + 9 * u, y: rect.midY - 2 + 30 * u))
+            }
+        }
     }
 
     // MARK: 图片资产皮肤（mmx 生成，bundle Resources/pet-art/，缺失时自动降级像素画/emoji）
@@ -1030,6 +1108,7 @@ final class PetPanelController {
     private var captionField: NSTextField!
     private var baseOrigin: NSPoint = .zero
     private var phase: Double = 0
+    private var sleepClock: CGFloat = 0        // 困意累计秒数（空闲且鼠标不在旁时上涨）
     private var dragging = false
     private var onDragEndHandler: ((NSPoint) -> Void)?
     private(set) var containerView: NSView!   // popover 锚点（v0.6 任务清单）
@@ -1140,9 +1219,14 @@ final class PetPanelController {
         }
         switch mode {
         case .idle:
-            captionField.stringValue = unreadCount > 0 ? "休息中 💤 · \(unreadCount) 未读" : "休息中 💤"
+            let base = PetArt.drowsiness > 0.8 ? "打盹中 zZ" : "休息中 💤"
+            captionField.stringValue = unreadCount > 0 ? "\(base) · \(unreadCount) 未读" : base
         case .working:
-            captionField.stringValue = runningCount > 0 ? "\(runningCount) 个任务执行中…" : "执行中…"
+            switch runningCount {
+            case 1: captionField.stringValue = "专注工作中…"
+            case 2...3: captionField.stringValue = "\(runningCount) 个任务并行中…"
+            default: captionField.stringValue = runningCount > 0 ? "\(runningCount) 个任务！忙翻了" : "执行中…"
+            }
         case .celebrate:
             captionField.stringValue = "任务完成！"
         case .error:
@@ -1150,22 +1234,39 @@ final class PetPanelController {
         }
     }
 
-    /// 12fps 呼吸/跳动动画（拖拽中暂停——否则每 83ms 把窗口重置回 baseOrigin，拖拽失效）
-    func tick(mode: PetMode) {
+    /// 12fps 呼吸/跳动动画（拖拽中暂停——否则每 83ms 把窗口重置回 baseOrigin，拖拽失效）。
+    /// runningCount 驱动忙碌分档动效；困意在此累积（空闲且鼠标不在旁），来任务/被注视即快速消退
+    func tick(mode: PetMode, runningCount: Int = 0) {
         guard panel != nil, !dragging else { return }
         phase += 1.0 / 12.0
         PetArt.ballTime += 1.0 / 12.0
+        PetArt.workTier = mode == .working ? (runningCount >= 4 ? 3 : max(1, runningCount)) : 0
+        let dt: CGFloat = 1.0 / 12.0
+        if mode == .idle && PetArt.gazeGlow < 0.35 {
+            sleepClock = min(sleepClock + dt, 240)          // 4 分钟攒满困意
+        } else {
+            sleepClock = max(0, sleepClock - dt * 20)       // 有活干/有人陪：约 12 秒清醒
+        }
+        PetArt.drowsiness = sleepClock / 240
+        var dx: CGFloat = 0
         var dy: CGFloat = 0
         switch mode {
-        case .working: dy = CGFloat(sin(phase * 2 * .pi * 0.8)) * 4
+        case .working:
+            switch PetArt.workTier {
+            case 3:
+                dy = CGFloat(sin(phase * 2 * .pi * 1.7)) * 5
+                dx = CGFloat(sin(phase * 2 * .pi * 4.7)) * 1.5   // 忙翻：急促小抖
+            case 2: dy = CGFloat(sin(phase * 2 * .pi * 1.25)) * 6
+            default: dy = CGFloat(sin(phase * 2 * .pi * 0.8)) * 4
+            }
         case .celebrate: dy = abs(CGFloat(sin(phase * 2 * .pi * 1.6))) * -12
         case .error: dy = CGFloat(sin(phase * 2 * .pi * 6.0)) * 2
-        case .idle: dy = CGFloat(sin(phase * 2 * .pi * 0.15)) * 2
+        case .idle: dy = CGFloat(sin(phase * 2 * .pi * 0.15)) * (2 + 1.5 * PetArt.drowsiness)
         }
-        panel.setFrameOrigin(NSPoint(x: baseOrigin.x, y: baseOrigin.y + dy))
+        panel.setFrameOrigin(NSPoint(x: baseOrigin.x + dx, y: baseOrigin.y + dy))
         // 矢量动画皮肤（球球一族）：眼神跟随 + 眨眼/呼吸逐帧重画。208×136 位图 12fps，开销可忽略
         if let skin = activeSkin, skin.animated, !artView.isHidden {
-            updateGaze()
+            updateGaze(mode: mode)
             artView.image = PetArt.image(skin: skin, mode: mode)
         }
     }
@@ -1173,7 +1274,8 @@ final class PetPanelController {
     /// 眼神跟随：读全局鼠标位置，视向单位向量逐帧平滑逼近（自然扫视速度）；
     /// 鼠标贴近（~90pt 内）时 gazeGlow → 1，瞳孔微放大——蔚来 NOMI 式"靠近就注视你"。
     /// 鼠标远离（>380pt 渐进）后交给慢速漫游（双正弦叠加的游移视线），不死盯光标。
-    private func updateGaze() {
+    /// 忙碌≥2 档时视线被"工作"接管：并行=在两块屏幕间来回扫，忙翻=急促乱瞟不看人。
+    private func updateGaze(mode: PetMode) {
         guard let panel else { return }
         let m = NSEvent.mouseLocation
         let eye = NSPoint(x: panel.frame.midX, y: panel.frame.midY + 30)
@@ -1183,8 +1285,13 @@ final class PetPanelController {
         let wx = sin(t * 0.35) * 0.7 + sin(t * 0.13 + 1.7) * 0.3
         let wy = sin(t * 0.21 + 0.8) * 0.35
         let w = max(0, min(1, CGFloat((d - 380) / 320)))       // 380→700pt 混入漫游
-        let tx = CGFloat(dx / d) * (1 - w) + wx * w
-        let ty = CGFloat(dy / d) * (1 - w) + wy * w
+        var tx = CGFloat(dx / d) * (1 - w) + wx * w
+        var ty = CGFloat(dy / d) * (1 - w) + wy * w
+        if mode == .working, PetArt.workTier >= 2 {
+            let f: CGFloat = PetArt.workTier >= 3 ? 4.0 : 2.0
+            tx = sin(t * f) * 0.85
+            ty = PetArt.workTier >= 3 ? sin(t * f * 0.53 + 1.2) * 0.35 : 0.12
+        }
         let len = max((tx * tx + ty * ty).squareRoot(), 1)
         PetArt.gaze.x += (tx / len - PetArt.gaze.x) * 0.35
         PetArt.gaze.y += (ty / len - PetArt.gaze.y) * 0.35
@@ -1394,7 +1501,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         Timer.scheduledTimer(withTimeInterval: 0.5, repeats: true) { [weak self] _ in self?.drainEvents() }
         Timer.scheduledTimer(withTimeInterval: 1.0 / 12.0, repeats: true) { [weak self] _ in
             guard let self else { return }
-            self.pet.tick(mode: self.currentMode())
+            self.pet.tick(mode: self.currentMode(), runningCount: self.lastRunning.count)
         }
     }
 
