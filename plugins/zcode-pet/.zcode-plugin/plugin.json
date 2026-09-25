@@ -1,9 +1,9 @@
 {
   "name": "zcode-pet",
   "version": "0.1.0",
-  "description": "ZCode desktop pet: floating pet + menu bar show the running task count, tiered alerts when tasks finish or fail",
+  "description": "ZCode desktop pet: floating pet + menu bar show the running task count; task completion/failure is surfaced on the pet itself (celebration animation + unread badge), no system notifications",
   "author": { "name": "kylinzhao" },
   "license": "MIT",
-  "keywords": ["pet", "notifications", "task-monitor"],
+  "keywords": ["pet", "task-monitor"],
   "hooks": "hooks/hooks.json"
 }

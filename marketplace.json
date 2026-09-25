@@ -6,11 +6,11 @@
       "name": "zcode-pet",
       "source": "./plugins/zcode-pet",
       "version": "0.1.0",
-      "description": "ZCode desktop pet: floating pet + menu bar show the running task count, tiered alerts when tasks finish or fail",
+      "description": "ZCode desktop pet: floating pet + menu bar show the running task count; task completion/failure is surfaced on the pet itself (celebration animation + unread badge), no system notifications",
       "displayName": "zcode-pet 桌面宠物",
       "displayName_i18n": { "zh-CN": "zcode-pet 桌面宠物" },
       "description_i18n": {
-        "zh-CN": "ZCode 桌面宠物：悬浮宠物+菜单栏实时显示执行中任务数；任务完成分级提醒（系统通知/必须点掉的弹窗）"
+        "zh-CN": "ZCode 桌面宠物：悬浮宠物+菜单栏实时显示执行中任务数；任务完成/出错由宠物本体直接提示（庆祝动画+未读角标），不发系统通知"
       },
       "category": "productivity"
     }

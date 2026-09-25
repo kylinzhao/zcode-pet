@@ -1,5 +1,5 @@
 #!/bin/bash
-# 安装：编译守护进程进 .app bundle（UN 可点击通知要求正规 bundle）→ ad-hoc 签名
+# 安装：编译守护进程进 .app bundle → ad-hoc 签名
 #      → 写入并加载 LaunchAgent（开机自启）→ 立即启动
 # 卸载：scripts/uninstall.sh
 set -euo pipefail
@@ -32,13 +32,13 @@ cat > "$APP_BUNDLE/Contents/Info.plist" <<'EOF'
 </plist>
 EOF
 
-# 通知横幅/通知中心里的图标取自 bundle 图标，签名前补进去。
+# 应用图标（访达/强制退出等处的身份标识），签名前补进去。
 # 默认 🐾；守护进程启动后若选了皮肤会自动换成对应图标（AppIcon.skin 是对账标记）。
 mkdir -p "$APP_BUNDLE/Contents/Resources"
 if "$EXE" --gen-icon 🐾 "$APP_BUNDLE/Contents/Resources/AppIcon.icns"; then
   printf 'paw' > "$APP_BUNDLE/Contents/Resources/AppIcon.skin"
 else
-  echo "  (图标生成失败，通知将无图标)"
+  echo "  (图标生成失败，不影响运行)"
 fi
 
 # 图片皮肤资产（mmx 生成，daemon/assets/pet/*.png）；缺失时守护进程自动降级像素画/emoji
@@ -47,7 +47,7 @@ if ls "$ROOT"/daemon/assets/pet/*.png >/dev/null 2>&1; then
   cp "$ROOT"/daemon/assets/pet/*.png "$APP_BUNDLE/Contents/Resources/pet-art/"
 fi
 
-codesign --force -s - "$APP_BUNDLE" >/dev/null 2>&1 || echo "  (ad-hoc 签名跳过，通知可能不可用)"
+codesign --force -s - "$APP_BUNDLE" >/dev/null 2>&1 || echo "  (ad-hoc 签名跳过)"
 
 chmod +x "$ROOT/plugins/zcode-pet/hooks/pet_hook.sh"
 rm -rf "$DATA_DIR/bin" 2>/dev/null || true
@@ -74,8 +74,7 @@ cat > "$PLIST" <<EOF
 EOF
 
 echo "[4/6] 清理旧实例并重启..."
-# 先杀旧进程再 bootstrap：新旧实例并存时，旧实例的运行时重签名会竞态破坏
-# 新实例的通知授权（实测出现过 "Notifications are not allowed"）
+# 先杀旧进程再 bootstrap：避免新旧实例并存（宠物窗口/菜单栏图标出现两份）
 pkill -x zcode-pet-daemon 2>/dev/null || true
 launchctl bootout "gui/$UID/dev.zcode.pet" 2>/dev/null || true
 sleep 1
@@ -92,5 +91,4 @@ fi
 
 echo "[6/6] 完成 ✅"
 echo "  守护进程 : ${EXE}（登录自启，SessionStart hook 兜底拉起）"
-echo "  首次运行 : macOS 会弹\"zcode-pet 想给你发送通知\"— 请点【允许】（点击通知跳转任务需要它）"
 echo "  日志     : $DATA_DIR/daemon.log"
