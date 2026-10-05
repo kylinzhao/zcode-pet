@@ -1277,7 +1277,8 @@ final class PetPanelController {
 
     static let size = NSSize(width: 130, height: 136)   // v0.9 放大 25%（原 104×110），字更清楚
 
-    init(savedOrigin: NSPoint?, onClick: @escaping () -> Void, onDragEnd: @escaping (NSPoint) -> Void) {
+    init(savedOrigin: NSPoint?, onClick: @escaping () -> Void, onDragEnd: @escaping (NSPoint) -> Void,
+         onRightClick: @escaping () -> Void) {
         onDragEndHandler = onDragEnd
         let p = NSPanel(contentRect: NSRect(origin: .zero, size: PetPanelController.size),
                         styleMask: [.borderless, .nonactivatingPanel], backing: .buffered, defer: false)
@@ -1290,6 +1291,7 @@ final class PetPanelController {
         let container = DragView(frame: NSRect(origin: .zero, size: PetPanelController.size))
         containerView = container
         container.onClick = onClick
+        container.onRightClick = onRightClick
         container.onDragBegin = { [weak self] in
             self?.dragging = true
             PetArt.dangle = 1            // 被拎起：瞪眼 O 嘴 + 身体拉伸
@@ -1544,6 +1546,7 @@ final class DragView: NSView {
     var onClick: (() -> Void)?
     var onDragBegin: (() -> Void)?
     var onDragEnd: ((NSPoint) -> Void)?
+    var onRightClick: (() -> Void)?
 
     override func hitTest(_ point: NSPoint) -> NSView? {
         frame.contains(point) ? self : nil
@@ -1579,6 +1582,12 @@ final class DragView: NSView {
             onClick?()
         }
     }
+
+    /// 右键直接退出宠物（菜单栏「退出宠物」的快捷入口；下次 session_start hook 会自动复活）
+    override func rightMouseDown(with event: NSEvent) {
+        onRightClick?()
+    }
+
     override func draw(_ dirtyRect: NSRect) {}
 }
 
@@ -1720,7 +1729,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                                  onDragEnd: { [weak self] origin in
                                      self?.state.petOrigin = [Double(origin.x), Double(origin.y)]
                                      self?.state.save()
-                                 })
+                                 },
+                                 onRightClick: { [weak self] in self?.quit() })
         eventTail = EventTail(path: PetConfig.dataDir + "/events.jsonl")
 
         statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
