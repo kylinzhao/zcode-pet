@@ -57,7 +57,8 @@
 //     22~6 点困意累积×2、清晨×0.6；⑧ error 余韵——报错结束后 ~50s 委屈撇嘴渐复。
 // v1.5 自定义大小：鼠标 hover 到宠物左上角浮出缩放手柄（对角双向箭头徽标），按住拖拽
 //     等比缩放（0.6×~2.2×，右下角锚定不动），双击手柄恢复默认；倍率持久化到 state.json，
-//     子视图帧/字号/圆角/位图密度全部随倍率重排（文案字号 10pt 下限，缩太小仍可读）。
+//     子视图帧/字号/圆角/位图密度全部随倍率重排（文案字号 10pt 下限 + 最多两行折行，
+//     缩太小仍可读）。
 //
 // 构建：bash scripts/install.sh（编译进 .app bundle + ad-hoc 签名）；自检：--test。
 
@@ -1404,6 +1405,8 @@ final class PetPanelController {
         captionField.textColor = NSColor(white: 1.0, alpha: 0.92)
         captionField.alignment = .center
         captionField.lineBreakMode = .byTruncatingTail
+        captionField.maximumNumberOfLines = 2   // 小尺寸下允许折两行，两行还放不下才截尾
+        captionField.cell?.wraps = true
         captionField.frame = NSRect(x: 7, y: 10, width: 116, height: 26)
 
         handleView = ResizeHandleView(frame: NSRect(x: 4, y: 106, width: 26, height: 26))
@@ -1471,8 +1474,9 @@ final class PetPanelController {
         artView.frame = NSRect(x: 0, y: 46 * s, width: 130 * s, height: 84 * s)
         emojiField.frame = NSRect(x: 3 * s, y: 50 * s, width: 124 * s, height: 72 * s)
         emojiField.font = .systemFont(ofSize: 50 * s)
-        captionField.frame = NSRect(x: 7 * s, y: 10 * s, width: 116 * s, height: 26 * s)
-        captionField.font = .systemFont(ofSize: max(10, 12.5 * s))   // 字号 10pt 下限：缩太小文案也读得清
+        let capFont = max(10, 12.5 * s)   // 字号 10pt 下限：缩太小文案也读得清
+        captionField.frame = NSRect(x: 7 * s, y: 10 * s, width: 116 * s, height: capFont * 2.45)
+        captionField.font = .systemFont(ofSize: capFont)
         handleView.frame = NSRect(x: 4 * s, y: sz.height - 30 * s, width: 26 * s, height: 26 * s)
     }
 
