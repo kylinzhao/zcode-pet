@@ -57,7 +57,7 @@
 //     22~6 点困意累积×2、清晨×0.6；⑧ error 余韵——报错结束后 ~50s 委屈撇嘴渐复。
 // v1.5 自定义大小：鼠标 hover 到宠物左上角浮出缩放手柄（对角双向箭头徽标），按住拖拽
 //     等比缩放（0.6×~2.2×，右下角锚定不动），双击手柄恢复默认；倍率持久化到 state.json，
-//     子视图帧/字号/圆角/位图密度全部随倍率重排。
+//     子视图帧/字号/圆角/位图密度全部随倍率重排（文案字号 10pt 下限，缩太小仍可读）。
 //
 // 构建：bash scripts/install.sh（编译进 .app bundle + ad-hoc 签名）；自检：--test。
 
@@ -1472,7 +1472,7 @@ final class PetPanelController {
         emojiField.frame = NSRect(x: 3 * s, y: 50 * s, width: 124 * s, height: 72 * s)
         emojiField.font = .systemFont(ofSize: 50 * s)
         captionField.frame = NSRect(x: 7 * s, y: 10 * s, width: 116 * s, height: 26 * s)
-        captionField.font = .systemFont(ofSize: 12.5 * s)
+        captionField.font = .systemFont(ofSize: max(10, 12.5 * s))   // 字号 10pt 下限：缩太小文案也读得清
         handleView.frame = NSRect(x: 4 * s, y: sz.height - 30 * s, width: 26 * s, height: 26 * s)
     }
 
