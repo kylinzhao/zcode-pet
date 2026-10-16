@@ -55,6 +55,9 @@
 //     呼一口气；⑤ 连击庆祝——90s 内完成 ≥3 个触发彩带粒子庆祝 8s「连击 ×N」；⑥ 开工
 //     干劲/收工松气——状态切换瞬间小跳+两侧金星 / 回 idle 眯眼呼气；⑦ 深夜作息——
 //     22~6 点困意累积×2、清晨×0.6；⑧ error 余韵——报错结束后 ~50s 委屈撇嘴渐复。
+// v1.5 自定义大小：鼠标 hover 到宠物左上角浮出缩放手柄（对角双向箭头徽标），按住拖拽
+//     等比缩放（0.6×~2.2×，右下角锚定不动），双击手柄恢复默认；倍率持久化到 state.json，
+//     子视图帧/字号/圆角/位图密度全部随倍率重排。
 //
 // 构建：bash scripts/install.sh（编译进 .app bundle + ad-hoc 签名）；自检：--test。
 
@@ -141,6 +144,7 @@ final class TaskStore {
 struct PetState {
     var petOrigin: [Double]?                 // 宠物窗口位置持久化
     var skinId: String?                      // 宠物造型
+    var petScale: Double?                    // 宠物大小倍率（左上角手柄拖拽调节，1=基准）
 
     static func path() -> String { PetConfig.dataDir + "/state.json" }
 
@@ -150,6 +154,7 @@ struct PetState {
               let obj = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any] else { return s }
         if let v = obj["petOrigin"] as? [Double], v.count == 2 { s.petOrigin = v }
         if let v = obj["skinId"] as? String { s.skinId = v }
+        if let v = obj["petScale"] as? Double { s.petScale = v }
         return s
     }
 
@@ -157,6 +162,7 @@ struct PetState {
         var obj: [String: Any] = [:]
         if let petOrigin { obj["petOrigin"] = petOrigin }
         if let skinId { obj["skinId"] = skinId }
+        if let petScale { obj["petScale"] = petScale }
         if let data = try? JSONSerialization.data(withJSONObject: obj) {
             _ = try? data.write(to: URL(fileURLWithPath: PetState.path()))
         }
@@ -262,9 +268,9 @@ enum PetArt {
         NSGraphicsContext.restoreGraphicsState()
     }
 
-    /// 2x 位图（Retina 清晰），给面板 NSImageView 用
-    static func image(skin: PetSkin, mode: PetMode) -> NSImage {
-        let rep = bitmap(skin: skin, mode: mode, scale: 2)
+    /// 位图（默认 2x Retina 清晰；面板放大时传更高倍率保持密度），给面板 NSImageView 用
+    static func image(skin: PetSkin, mode: PetMode, scale: CGFloat = 2) -> NSImage {
+        let rep = bitmap(skin: skin, mode: mode, scale: scale)
         let img = NSImage(size: rep.size)
         img.addRepresentation(rep)
         return img
@@ -1256,6 +1262,48 @@ final class TaskListPopover {
     }
 }
 
+// MARK: - 大小调节手柄（hover 宠物左上角浮现的缩放徽标）
+
+/// 左上角缩放手柄：圆形徽标 + 对角双向箭头（↖↘），纯矢量、跟随家族设计语言
+final class ResizeHandleView: NSView {
+    var highlighted = false { didSet { needsDisplay = true } }
+
+    override func draw(_ dirtyRect: NSRect) {
+        let w = bounds.width
+        let ring = NSBezierPath(ovalIn: bounds.insetBy(dx: w * 0.11, dy: w * 0.11))
+        NSColor.white.withAlphaComponent(highlighted ? 0.22 : 0.13).setFill()
+        ring.fill()
+        NSColor.white.withAlphaComponent(highlighted ? 0.55 : 0.30).setStroke()
+        ring.lineWidth = 1
+        ring.stroke()
+
+        let c = NSPoint(x: bounds.midX, y: bounds.midY)
+        let d = w * 0.24                                   // 箭杆半程
+        let tipTL = NSPoint(x: c.x - d, y: c.y + d)        // 视觉左上尖
+        let tipBR = NSPoint(x: c.x + d, y: c.y - d)        // 视觉右下尖
+        NSColor.white.withAlphaComponent(highlighted ? 0.95 : 0.72).setStroke()
+        let arrow = NSBezierPath()
+        arrow.lineCapStyle = .round
+        arrow.move(to: tipTL)
+        arrow.line(to: tipBR)
+        head(arrow, at: tipTL, dx: -1, dy: 1, len: w * 0.14)
+        head(arrow, at: tipBR, dx: 1, dy: -1, len: w * 0.14)
+        arrow.lineWidth = max(1.2, w * 0.055)
+        arrow.stroke()
+    }
+
+    /// 箭头头部：从尖端沿 (dx,dy) 方向 ±30° 各画一根短须
+    private func head(_ p: NSBezierPath, at tip: NSPoint, dx: CGFloat, dy: CGFloat, len: CGFloat) {
+        let a: CGFloat = 0.52
+        for s in [CGFloat(-1), 1] {
+            let sa = sin(a) * s, ca = cos(a)
+            p.move(to: tip)
+            p.line(to: NSPoint(x: tip.x + (dx * ca - dy * sa) * len,
+                               y: tip.y + (dx * sa + dy * ca) * len))
+        }
+    }
+}
+
 // MARK: - Pet panel（悬浮宠物：点击回 ZCode，拖动移动且位置记忆）
 
 final class PetPanelController {
@@ -1273,14 +1321,29 @@ final class PetPanelController {
     private var lastTickMode: PetMode?         // 模式切换检测（触发干劲/松气/余韵）
     private var dragging = false
     private var onDragEndHandler: ((NSPoint) -> Void)?
+    private var onResizeEndHandler: ((CGFloat, NSPoint) -> Void)?
     private(set) var containerView: NSView!   // popover 锚点（v0.6 任务清单）
+    private var handleView: ResizeHandleView! // 左上角缩放手柄（hover 浮现）
+    private var resizing = false
+    private var cornerHover = false
 
-    static let size = NSSize(width: 130, height: 136)   // v0.9 放大 25%（原 104×110），字更清楚
+    static let size = NSSize(width: 130, height: 136)   // 基准尺寸（v0.9 放大 25%，字更清楚）
+    static let minScale: CGFloat = 0.6                  // 缩放边界：0.6× 勉强可读，2.2× 占屏恰当
+    static let maxScale: CGFloat = 2.2
+    private var scale: CGFloat = 1                      // 当前大小倍率
+    private var currentSize: NSSize {
+        NSSize(width: Self.size.width * scale, height: Self.size.height * scale)
+    }
+    /// 位图密度随倍率：面板放大后矢量位图同步加密，不拉伸发虚
+    private var bitmapScale: CGFloat { max(2, (2 * scale).rounded()) }
 
-    init(savedOrigin: NSPoint?, onClick: @escaping () -> Void, onDragEnd: @escaping (NSPoint) -> Void,
-         onRightClick: @escaping () -> Void) {
+    init(savedOrigin: NSPoint?, savedScale: Double?, onClick: @escaping () -> Void,
+         onDragEnd: @escaping (NSPoint) -> Void, onRightClick: @escaping () -> Void,
+         onResizeEnd: @escaping (CGFloat, NSPoint) -> Void) {
         onDragEndHandler = onDragEnd
-        let p = NSPanel(contentRect: NSRect(origin: .zero, size: PetPanelController.size),
+        onResizeEndHandler = onResizeEnd
+        scale = min(Self.maxScale, max(Self.minScale, CGFloat(savedScale ?? 1)))
+        let p = NSPanel(contentRect: NSRect(origin: .zero, size: currentSize),
                         styleMask: [.borderless, .nonactivatingPanel], backing: .buffered, defer: false)
         p.level = .floating
         p.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary]
@@ -1288,7 +1351,7 @@ final class PetPanelController {
         p.backgroundColor = .clear
         p.hasShadow = true
 
-        let container = DragView(frame: NSRect(origin: .zero, size: PetPanelController.size))
+        let container = DragView(frame: NSRect(origin: .zero, size: currentSize))
         containerView = container
         container.onClick = onClick
         container.onRightClick = onRightClick
@@ -1306,6 +1369,21 @@ final class PetPanelController {
             self.redrawStatic()
             self.baseOrigin = self.panel.frame.origin
             onDragEnd(self.baseOrigin)
+        }
+        // v1.5 左上角缩放手柄：热区判定/起值/开始·过程·结束/双击复位，事件循环在 DragView
+        container.resizeHitTest = { [weak self] pt in self?.inResizeCorner(pt) ?? false }
+        container.startResizeScale = { [weak self] in self?.scale ?? 1 }
+        container.onResizeBegin = { [weak self] in
+            guard let self else { return }
+            self.resizing = true
+            self.handleView.isHidden = false
+            self.handleView.highlighted = true
+        }
+        container.onResize = { [weak self] in self?.applyResize(scale: $0) }
+        container.onResizeEnd = { [weak self] in self?.finishResize() }
+        container.onResizeReset = { [weak self] in
+            self?.applyResize(scale: 1)
+            self?.finishResize()
         }
         container.wantsLayer = true
         container.layer?.cornerRadius = 20
@@ -1328,17 +1406,23 @@ final class PetPanelController {
         captionField.lineBreakMode = .byTruncatingTail
         captionField.frame = NSRect(x: 7, y: 10, width: 116, height: 26)
 
+        handleView = ResizeHandleView(frame: NSRect(x: 4, y: 106, width: 26, height: 26))
+        handleView.isHidden = true
+
         container.addSubview(artView)
         container.addSubview(emojiField)
         container.addSubview(captionField)
+        container.addSubview(handleView)
         p.contentView = container
+        relayout()
 
         // 恢复保存的位置（clamp 到当前屏幕），否则右下角默认
-        baseOrigin = NSPoint(x: NSScreen.main?.visibleFrame.maxX ?? 1200 - PetPanelController.size.width - 24,
+        let sz = currentSize
+        baseOrigin = NSPoint(x: (NSScreen.main?.visibleFrame.maxX ?? 1200) - sz.width - 24,
                              y: (NSScreen.main?.visibleFrame.minY ?? 200) + 28)
         if let origin = savedOrigin, let vf = NSScreen.main?.visibleFrame {
-            let x = min(max(origin.x, vf.minX), vf.maxX - PetPanelController.size.width)
-            let y = min(max(origin.y, vf.minY), vf.maxY - PetPanelController.size.height)
+            let x = min(max(origin.x, vf.minX), vf.maxX - sz.width)
+            let y = min(max(origin.y, vf.minY), vf.maxY - sz.height)
             baseOrigin = NSPoint(x: x, y: y)
         }
         p.setFrameOrigin(baseOrigin)
@@ -1357,12 +1441,61 @@ final class PetPanelController {
     /// 把窗口夹回 NSScreen.main 可见区，需要时回写持久化位置
     func ensureOnScreen(persist: Bool) {
         guard let vf = NSScreen.main?.visibleFrame else { return }
-        let x = min(max(panel.frame.origin.x, vf.minX), vf.maxX - PetPanelController.size.width)
-        let y = min(max(panel.frame.origin.y, vf.minY), vf.maxY - PetPanelController.size.height)
+        let x = min(max(panel.frame.origin.x, vf.minX), vf.maxX - panel.frame.width)
+        let y = min(max(panel.frame.origin.y, vf.minY), vf.maxY - panel.frame.height)
         guard NSPoint(x: x, y: y) != panel.frame.origin else { return }
         baseOrigin = NSPoint(x: x, y: y)
         panel.setFrameOrigin(baseOrigin)
         if persist { onDragEndHandler?(baseOrigin) }
+    }
+
+    /// 容器坐标的左上角热区（视觉左上 = x 小、y 大；上限 40pt 免得大尺寸时抢占点击）
+    private func inResizeCorner(_ pt: NSPoint) -> Bool {
+        let r = min(30 * scale, 40)
+        return pt.x <= r && pt.y >= currentSize.height - r
+    }
+
+    /// 左上角 hover 热区（屏幕坐标，罩住整枚手柄再放宽一点好悬停）
+    private func resizeCornerRect() -> NSRect {
+        let r = 30 * scale + 6
+        let f = panel.frame
+        return NSRect(x: f.minX - 6, y: f.maxY - r, width: r + 6, height: r)
+    }
+
+    /// 尺寸变化后按倍率重排：子视图帧/字号/圆角/手柄全部等比
+    private func relayout() {
+        let s = scale
+        let sz = currentSize
+        containerView.frame = NSRect(origin: .zero, size: sz)
+        containerView.layer?.cornerRadius = 20 * s
+        artView.frame = NSRect(x: 0, y: 46 * s, width: 130 * s, height: 84 * s)
+        emojiField.frame = NSRect(x: 3 * s, y: 50 * s, width: 124 * s, height: 72 * s)
+        emojiField.font = .systemFont(ofSize: 50 * s)
+        captionField.frame = NSRect(x: 7 * s, y: 10 * s, width: 116 * s, height: 26 * s)
+        captionField.font = .systemFont(ofSize: 12.5 * s)
+        handleView.frame = NSRect(x: 4 * s, y: sz.height - 30 * s, width: 26 * s, height: 26 * s)
+    }
+
+    /// 拖拽手柄中：右下角锚定等比改尺寸（tick 在 resizing 期间暂停，不与浮动动画打架）
+    private func applyResize(scale s: CGFloat) {
+        guard let panel else { return }
+        scale = s
+        let sz = currentSize
+        let f = panel.frame
+        panel.setFrame(NSRect(x: f.maxX - sz.width, y: f.minY, width: sz.width, height: sz.height),
+                       display: true)
+        relayout()
+        redrawStatic()
+    }
+
+    /// 缩放收尾：夹回屏幕、动画基准点落到新位置、持久化倍率与位置
+    private func finishResize() {
+        resizing = false
+        ensureOnScreen(persist: false)
+        baseOrigin = panel.frame.origin
+        handleView.highlighted = cornerHover
+        handleView.isHidden = !cornerHover
+        onResizeEndHandler?(scale, baseOrigin)
     }
 
     func update(mode: PetMode, skin: PetSkin, runningCount: Int, unreadCount: Int) {
@@ -1377,7 +1510,7 @@ final class PetPanelController {
             emojiField.isHidden = true
             artView.isHidden = false
             if skin.animated {
-                artView.image = PetArt.image(skin: skin, mode: mode)
+                artView.image = PetArt.image(skin: skin, mode: mode, scale: bitmapScale)
             } else {
                 let key = "\(skin.id)-\(mode)"
                 if artCache[key] == nil { artCache[key] = PetArt.image(skin: skin, mode: mode) }
@@ -1417,12 +1550,19 @@ final class PetPanelController {
     /// 所有画帧输入在这里注入 PetArt：忙碌档/不耐烦/困意时钟/摸头计量/模式切换小情绪。
     /// 浮动与呼吸用相位积分（bobPhase/breathePhase），深睡降频时不跳相位。
     func tick(mode: PetMode, runningCount: Int = 0, longestRunning: TimeInterval = 0) {
-        guard panel != nil, !dragging else { return }
+        guard panel != nil, !dragging, !resizing else { return }
         phase += 1.0 / 12.0
         let dt: CGFloat = 1.0 / 12.0
         PetArt.ballTime += dt
         // 悬停检测提前：既驱动摸头计量，也决定窗口是否钉住
         let overPet = panel.frame.insetBy(dx: -8, dy: -8).contains(NSEvent.mouseLocation)
+        // 左上角缩放手柄：鼠标游到角部浮出（12fps 轮询 mouseLocation，无需事件）
+        let hot = resizeCornerRect().contains(NSEvent.mouseLocation)
+        if hot != cornerHover {
+            cornerHover = hot
+            handleView.isHidden = !hot
+            handleView.highlighted = hot
+        }
 
         PetArt.workTier = mode == .working ? (runningCount >= 4 ? 3 : max(1, runningCount)) : 0
         PetArt.impatience = mode == .working
@@ -1499,14 +1639,14 @@ final class PetPanelController {
         // 矢量动画皮肤（球球一族）：眼神跟随 + 眨眼/呼吸逐帧重画。208×136 位图 12fps，开销可忽略
         if let skin = activeSkin, skin.animated, !artView.isHidden {
             updateGaze(mode: mode)
-            artView.image = PetArt.image(skin: skin, mode: mode)
+            artView.image = PetArt.image(skin: skin, mode: mode, scale: bitmapScale)
         }
     }
 
     /// 拖拽起止瞬间 tick 是暂停的，手动重绘一帧（拎起/落地的表情立即上脸）
     private func redrawStatic() {
         if let skin = activeSkin, skin.animated, !artView.isHidden {
-            artView.image = PetArt.image(skin: skin, mode: lastTickMode ?? .idle)
+            artView.image = PetArt.image(skin: skin, mode: lastTickMode ?? .idle, scale: bitmapScale)
         }
     }
 
@@ -1547,6 +1687,13 @@ final class DragView: NSView {
     var onDragBegin: (() -> Void)?
     var onDragEnd: ((NSPoint) -> Void)?
     var onRightClick: (() -> Void)?
+    // 左上角缩放手柄：热区判定（容器坐标）/缩放起值/开始·过程·结束/双击复位
+    var resizeHitTest: ((NSPoint) -> Bool)?
+    var startResizeScale: (() -> CGFloat)?
+    var onResizeBegin: (() -> Void)?
+    var onResize: ((CGFloat) -> Void)?
+    var onResizeEnd: (() -> Void)?
+    var onResizeReset: (() -> Void)?
 
     override func hitTest(_ point: NSPoint) -> NSView? {
         frame.contains(point) ? self : nil
@@ -1556,6 +1703,15 @@ final class DragView: NSView {
     override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
 
     override func mouseDown(with event: NSEvent) {
+        // 左上角热区：拖拽缩放（双击手柄复位默认大小）；其余区域维持拖动/点击
+        if resizeHitTest?(convert(event.locationInWindow, from: nil)) == true {
+            if event.clickCount >= 2 {
+                onResizeReset?()
+            } else {
+                runResizeLoop()
+            }
+            return
+        }
         guard let window else { return }
         let startMouse = NSEvent.mouseLocation
         let startOrigin = window.frame.origin
@@ -1581,6 +1737,29 @@ final class DragView: NSView {
         } else {
             onClick?()
         }
+    }
+
+    /// 缩放事件循环（与拖动同理：nonactivating borderless panel 上系统 resize 不稳，手动跟踪）。
+    /// 右下角锚定，按抓取点到锚点的距离比等比缩放——刚抓住时比值为 1，尺寸不跳变
+    private func runResizeLoop() {
+        guard let window else { return }
+        let f = window.frame
+        let grab = NSEvent.mouseLocation
+        let dx0 = max(1, f.maxX - grab.x)
+        let dy0 = max(1, grab.y - f.minY)
+        let s0 = startResizeScale?() ?? 1
+        onResizeBegin?()
+        while true {
+            guard let e = window.nextEvent(matching: [.leftMouseDragged, .leftMouseUp]) else { break }
+            if e.type == .leftMouseUp { break }
+            let cur = NSEvent.mouseLocation
+            let dx = max(0, f.maxX - cur.x)
+            let dy = max(0, cur.y - f.minY)
+            let raw = s0 * max(dx / dx0, dy / dy0)
+            let s = min(max(raw, PetPanelController.minScale), PetPanelController.maxScale)
+            onResize?((s * 100).rounded() / 100)
+        }
+        onResizeEnd?()
     }
 
     /// 右键直接退出宠物（菜单栏「退出宠物」的快捷入口；下次 session_start hook 会自动复活）
@@ -1725,12 +1904,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     func applicationDidFinishLaunching(_ notification: Notification) {
         let saved = state.petOrigin.map { NSPoint(x: CGFloat($0[0]), y: CGFloat($0[1])) }
         pet = PetPanelController(savedOrigin: saved,
+                                 savedScale: state.petScale,
                                  onClick: { [weak self] in self?.toggleTaskList() },
                                  onDragEnd: { [weak self] origin in
                                      self?.state.petOrigin = [Double(origin.x), Double(origin.y)]
                                      self?.state.save()
                                  },
-                                 onRightClick: { [weak self] in self?.quit() })
+                                 onRightClick: { [weak self] in self?.quit() },
+                                 onResizeEnd: { [weak self] scale, origin in
+                                     self?.state.petScale = Double(scale)
+                                     self?.state.petOrigin = [Double(origin.x), Double(origin.y)]
+                                     self?.state.save()
+                                 })
         eventTail = EventTail(path: PetConfig.dataDir + "/events.jsonl")
 
         statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
