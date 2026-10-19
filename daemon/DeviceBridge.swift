@@ -30,6 +30,13 @@
 //
 // 自检：--bridge-selftest [device_strings.txt]（无 GUI、无网络、不创建 CBCentralManager
 // ——不触发 TCC 授权弹窗；scripts/check_esp32_bridge.sh 调用）
+// 独立扫描：--ble-scan [秒]（真机验证用；创建 CBCentralManager，复用本 app 已授权的
+// NSBluetoothAlwaysUsageDescription，全频段扫 N 秒列出设备，含目标服务 UUID 的打标，扫完即退）
+//
+// 日志观测点（daemon.log，全部低频节流，供真机验证取证）：
+//   扫描中（60s 节流）/ 发现设备 / 连接失败 / TX 已订阅→online / 订阅丢失 / 断开 / 判死
+//   status 下发：建连首帧打完整 payload，此后每 15 帧（~30s）一条心跳（含最近 ackSeq）
+//   设备→Mac：hello 60s 节流一条；ack 不单打（并入 status 心跳的 ackSeq）；read 每条必打
 
 import CoreBluetooth
 import Foundation
@@ -164,6 +171,12 @@ final class DeviceBridge: NSObject, CBCentralManagerDelegate, CBPeripheralDelega
     private var sendTimer: Timer?
     private var watchdog: Timer?
 
+    // 低频日志节流与观测状态（真机验证取证；见文件头「日志观测点」）
+    private var lastAckSeq = -1                       // 最近收到的 ack.seq（status 心跳行携带）
+    private var lastLogSeq = 0                        // 上次打日志时的 seq（首帧 + 每 15 帧心跳）
+    private var lastHelloLogAt: TimeInterval = 0      // hello 60s 节流
+    private var lastScanLogAt: TimeInterval = 0       // 扫描存活 60s 节流
+
     // MARK: 生命周期
 
     func start() {
@@ -248,9 +261,15 @@ final class DeviceBridge: NSObject, CBCentralManagerDelegate, CBPeripheralDelega
         guard let obj = DeviceBridge.message(data) else { return }
         switch obj["t"] as? String {
         case "hello", "ack":
+            if obj["t"] as? String == "ack", let s = obj["seq"] as? Int { lastAckSeq = s }
+            if obj["t"] as? String == "hello", now - lastHelloLogAt >= 60 {
+                lastHelloLogAt = now
+                NSLog("[zcode-pet] device bridge: 设备 hello（fw=\(obj["fw"] ?? "?")），设备→Mac 通道已通")
+            }
             link.packet(now: now)
         case "read":
             link.packet(now: now)
+            NSLog("[zcode-pet] device bridge: 收到设备 OK 键已读确认（read）")
             onRead?()
         default:
             break
@@ -283,6 +302,13 @@ final class DeviceBridge: NSObject, CBCentralManagerDelegate, CBPeripheralDelega
         guard let data = DeviceBridge.statusJSON(seq: seq, state: s, tsMs: lastSentAt * 1000) else { return }
         assert(data.count <= Self.maxStatusBytes, "status 帧超 RX 特征上限：\(data.count)B")
         guard data.count <= Self.maxStatusBytes else { return }
+        // 观测点：建连首帧打完整 payload（协议取证），此后每 15 帧（~30s）一条心跳，
+        // 携带最近 ackSeq——心跳在走 = push 与 ack 双向都在发生
+        if seq == 1 || seq - lastLogSeq >= 15 {
+            lastLogSeq = seq
+            let payload = seq == 1 ? (String(data: data, encoding: .utf8) ?? "<bin>") : ""
+            NSLog("[zcode-pet] device bridge: status 下发 seq=\(seq) \(data.count)B 最近ackSeq=\(lastAckSeq)\(payload.isEmpty ? "" : " \(payload)")")
+        }
         // write-with-response：ATT 层逐包确认；MTU 不足时 CoreBluetooth 自动走
         // Prepare/Execute long write（NimBLE 侧自动重装，回调收到完整 buffer）
         p.writeValue(data, for: rx, type: .withResponse)
@@ -305,6 +331,11 @@ final class DeviceBridge: NSObject, CBCentralManagerDelegate, CBPeripheralDelega
     private func startScan(now: TimeInterval = Date().timeIntervalSince1970) {
         guard let central, central.state == .poweredOn else { return }
         link.scanStarted(now: now)
+        // 观测点：60s 一条，区分「扫描活着但设备不在」与「桥挂了」（零发现时验证员据此判设备不在场）
+        if now - lastScanLogAt >= 60 {
+            lastScanLogAt = now
+            NSLog("[zcode-pet] device bridge: 扫描中（服务 \(Self.serviceUUID)）…")
+        }
         // 按服务 UUID 过滤扫描（macOS 主动扫描，可收齐 scan response 里的完整设备名）
         central.scanForPeripherals(withServices: [Self.serviceUUID], options: nil)
     }
@@ -618,6 +649,95 @@ func runBridgeSelfTest(stringsPath: String?) -> Int32 {
 
     print("== bridge self-test \(failed == 0 ? "done ==" : "FAILED (\(failed)) ==")")
     return failed == 0 ? 0 : 1
+}
+
+// MARK: - --ble-scan（独立 BLE 扫描，真机验证用）
+
+/// 扫描载体：只收发现事件并按 identifier 去重，超时后汇总退出。不写任何状态文件。
+/// 退出码：0=发现 zcode-pet 服务 UUID 广播；1=扫完无 zcode-pet（设备不在场/未上电）；
+/// 2=蓝牙不可用（关闭/未授权/不支持）；3=蓝牙状态迟迟未就绪（如授权弹窗无人点）。
+final class BleScanSink: NSObject, CBCentralManagerDelegate {
+    private let seconds: TimeInterval
+    private var central: CBCentralManager?
+    private var seen: [UUID: String] = [:]   // 显式 [:]：CoreBluetooth 导入下 [] 会触发 Swift 5.10 字典推断歧义
+    private var oursCount = 0
+    private(set) var finished = false
+    private(set) var exitCode: Int32 = 0
+
+    init(seconds: TimeInterval) { self.seconds = seconds }
+
+    func attach(_ central: CBCentralManager) { self.central = central }
+
+    func centralManagerDidUpdateState(_ central: CBCentralManager) {
+        switch central.state {
+        case .poweredOn:
+            // 全频段扫描（不过滤服务 UUID）：设备在广播但 UUID 配错时也能看到它的名字
+            central.scanForPeripherals(withServices: nil, options: nil)
+            print("  扫描中…（全频段 \(Int(seconds))s；[✓] = 带 zcode-pet 服务 UUID）")
+            DispatchQueue.main.asyncAfter(deadline: .now() + seconds) { [weak self] in
+                self?.summarize()
+            }
+        case .poweredOff:
+            print("  ✗ Mac 蓝牙已关闭：系统设置 → 蓝牙打开后重试")
+            finish(2)
+        case .unauthorized:
+            print("  ✗ 无蓝牙权限：系统设置 → 隐私与安全性 → 蓝牙，允许 zcode-pet")
+            finish(2)
+        case .unsupported:
+            print("  ✗ 本机不支持 BLE")
+            finish(2)
+        default:
+            break   // .unknown：等下一次状态回调（runBleScan 有总超时兜底）
+        }
+    }
+
+    func centralManager(_ central: CBCentralManager, didDiscover peripheral: CBPeripheral,
+                        advertisementData: [String: Any], rssi RSSI: NSNumber) {
+        guard seen[peripheral.identifier] == nil else { return }
+        let name = (advertisementData[CBAdvertisementDataLocalNameKey] as? String)
+            ?? peripheral.name ?? "<未命名>"
+        let uuids = (advertisementData[CBAdvertisementDataServiceUUIDsKey] as? [CBUUID]) ?? []
+        let ours = uuids.contains(DeviceBridge.serviceUUID)
+        if ours { oursCount += 1 }
+        seen[peripheral.identifier] = name
+        print("  [\(ours ? "✓" : " ")] \(name) rssi=\(RSSI)\(ours ? " ← zcode-pet！" : "")")
+    }
+
+    private func summarize() {
+        central?.stopScan()
+        if oursCount > 0 {
+            print("== 发现 zcode-pet 广播（\(oursCount) 次有服务 UUID 的发现事件）→ 设备在广播 ==")
+            finish(0)
+        } else {
+            print("== \(Int(seconds))s 未发现 zcode-pet 服务 UUID 广播（周围 BLE 设备 \(seen.count) 个）" +
+                  "→ 设备未上电/不在附近/广播未起，确认后重跑 ==")
+            finish(1)
+        }
+    }
+
+    private func finish(_ code: Int32) {
+        exitCode = code
+        finished = true
+    }
+}
+
+/// --ble-scan [秒]：创建 CBCentralManager 全频段扫 N 秒（默认 10），列出发现的外设，
+/// 带 zcode-pet 服务 UUID 的行打 ✓。复用本 app bundle 的 NSBluetoothAlwaysUsageDescription
+/// 与既有 TCC 授权；从 shell 直跑若被 TCC 拒（responsible process 归属 shell 祖先），
+/// 改用 `open ~/.zcode-pet/zcode-pet.app --args --ble-scan`（授权归属干净）。
+func runBleScan(seconds: TimeInterval) -> Int32 {
+    print("== zcode-pet BLE 扫描（找服务 \(DeviceBridge.serviceUUID.uuidString)）==")
+    let sink = BleScanSink(seconds: seconds)
+    sink.attach(CBCentralManager(delegate: sink, queue: nil))
+    let deadline = Date().addingTimeInterval(seconds + 15)   // 兜底：蓝牙状态一直 unknown 时也能退出
+    while !sink.finished, Date() < deadline {
+        RunLoop.main.run(until: Date().addingTimeInterval(0.2))
+    }
+    if !sink.finished {
+        print("  ✗ 蓝牙状态迟迟未就绪（权限弹窗待响应或子系统未恢复），请处理系统弹窗后重跑")
+        return 3
+    }
+    return sink.exitCode
 }
 
 // MARK: - device_strings.txt 解析（selftest 与 gen 脚本共用同一格式契约）

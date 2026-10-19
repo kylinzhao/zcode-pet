@@ -2876,6 +2876,16 @@ if let i = CommandLine.arguments.firstIndex(of: "--bridge-selftest") {
     exit(runBridgeSelfTest(stringsPath: path))
 }
 
+// --ble-scan [秒]：独立 BLE 扫描（默认 10s，找 zcode-pet 服务 UUID 广播；真机验证用）。
+// 创建 CBCentralManager（复用本 app 已授权的蓝牙权限），不进 GUI，扫完即退。
+if let i = CommandLine.arguments.firstIndex(of: "--ble-scan") {
+    var secs = 10.0
+    if i + 1 < CommandLine.arguments.count, let v = Double(CommandLine.arguments[i + 1]), v > 0 {
+        secs = v
+    }
+    exit(runBleScan(seconds: secs))
+}
+
 let app = NSApplication.shared
 let delegate = AppDelegate()
 app.delegate = delegate
