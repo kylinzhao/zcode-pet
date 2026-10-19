@@ -24,7 +24,7 @@ ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 TARGET="${AI_PASSPORT_DIR:-$ROOT/../ai-passport}"
 GEN="$TARGET/scripts/gen_device_assets.sh"
 if [[ ! -f "$GEN" ]]; then
-    echo "ERROR: 找不到生成器 $GEN（可用 AI_PASSPORT_DIR 指定 ai-passport 仓库路径）" >&2
+    echo "ERROR: 找不到生成器 ${GEN}（可用 AI_PASSPORT_DIR 指定 ai-passport 仓库路径）" >&2
     exit 1
 fi
 exec bash "$GEN"
