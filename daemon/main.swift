@@ -60,11 +60,16 @@
 //     子视图帧/字号/圆角/位图密度全部随倍率重排（文案字号 10pt 下限 + 最多两行折行，
 //     缩太小仍可读）。
 // v1.6 ESP32 桌面桥接：抽出 PetDisplayState 快照（mode/tier/run/unread/mid/文案）作为
-//     宠物文案与设备的单一语义源，daemon/Esp32Bridge.swift 经 UDP/8765 把快照推给
-//     FoloToy AI Passport 设备镜像播放（hello 学 IP / 2s status / 6s 无 ACK 降级广播 /
-//     10s 判离线 / read 走本地已读水位）；--export-esp32 用 PetArt 引擎离线烘焙 12 段
-//     锁相循环 clip 成 .zpf 帧包（ZPF1，16 色 RGB565 + 1bpp 掩码 RLE + 4bpp 索引）。
-//     校验：scripts/check_esp32_bridge.sh。
+//     宠物文案与设备的单一语义源，把快照推给 FoloToy AI Passport 设备镜像播放；
+//     --export-esp32 用 PetArt 引擎离线烘焙 12 段锁相循环 clip 成 .zpf 帧包
+//     （ZPF1，16 色 RGB565 + 1bpp 掩码 RLE + 4bpp 索引）。校验：scripts/check_esp32_bridge.sh。
+// v1.7 桥接传输 BLE 化（v1.6 的 UDP/8765 整体退役）：daemon/DeviceBridge.swift 用
+//     CoreBluetooth 中心角色扫描/连接设备（NimBLE 外设常驻广播，服务
+//     5A1C0001-7BCD-4E0F-9A2B-3D5E6F8091A2），status ≤512B 走 write-with-response
+//     （preferred MTU 256，无需自定义分块）；订阅 TX notify = online，断开退避重扫
+//     （0/1/2/5s），10s 无设备包判死重连；协议消息（hello/status/ack/read）字段不变；
+//     UDP 的 degraded 广播降级态取消（ATT 写回执本身逐包确认）。Info.plist 需
+//     NSBluetoothAlwaysUsageDescription（install.sh 模板已含）。
 //
 // 构建：bash scripts/install.sh（编译进 .app bundle + ad-hoc 签名）；自检：--test。
 
@@ -79,7 +84,7 @@ struct PetConfig {
     var busyStaleSeconds: TimeInterval    // 看门狗：忙碌会话超过此时长无事件则静默丢弃
     var confirmDelay: TimeInterval        // turn_end 后等 DB 落库的确认延迟
     var zcodeAppBundleId: String
-    var bridgeEnabled: Bool               // ESP32 桥接（udp/8765 推状态给设备镜像）
+    var bridgeEnabled: Bool               // ESP32 桥接（BLE GATT 推状态给设备镜像）
 
     static let dataDir = NSHomeDirectory() + "/.zcode-pet"
 
@@ -2366,8 +2371,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var lastStateSave = 0.0
     private var recentCompletions: [Double] = []   // 90s 内完成任务时刻（连击庆祝）
 
-    // v1.6 ESP32 桥接：设备 OK 已读水位 + UDP 状态推送（nil = config.json bridge:false 关闭）
-    private var bridge: Esp32Bridge?
+    // v1.6/v1.7 ESP32 桥接：设备 OK 已读水位 + BLE status 推送（nil = config.json bridge:false 关闭）
+    private var bridge: DeviceBridge?
     private var ackedReadTs: Double = 0
 
     override init() {
@@ -2396,8 +2401,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         eventTail = EventTail(path: PetConfig.dataDir + "/events.jsonl")
 
         // ESP32 桥接：与宠物文案共用 PetDisplayState 快照；设备 OK 键走本地已读水位
+        // （CBCentralManager 在此创建——LaunchAgent 首启会弹 TCC 蓝牙授权，拒绝后
+        // tooltip 指路系统设置，授权后 didPowerOn 自动恢复扫描）
         if config.bridgeEnabled {
-            let b = Esp32Bridge()
+            let b = DeviceBridge()
             b.stateProvider = { [weak self] in
                 guard let self else { return nil }
                 return PetDisplayState.snapshot(mode: self.currentMode(),

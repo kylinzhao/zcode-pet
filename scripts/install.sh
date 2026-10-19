@@ -12,7 +12,7 @@ PLIST="$HOME/Library/LaunchAgents/dev.zcode.pet.plist"
 
 echo "[1/6] 编译守护进程到 .app bundle..."
 mkdir -p "$APP_BUNDLE/Contents/MacOS"
-swiftc -O "$ROOT/daemon/main.swift" "$ROOT/daemon/Esp32Bridge.swift" -o "$EXE"
+swiftc -O "$ROOT/daemon/main.swift" "$ROOT/daemon/DeviceBridge.swift" -o "$EXE"
 
 cat > "$APP_BUNDLE/Contents/Info.plist" <<'EOF'
 <?xml version="1.0" encoding="UTF-8"?>
@@ -24,10 +24,13 @@ cat > "$APP_BUNDLE/Contents/Info.plist" <<'EOF'
   <key>CFBundleName</key><string>zcode-pet</string>
   <key>CFBundleDisplayName</key><string>zcode-pet</string>
   <key>CFBundlePackageType</key><string>APPL</string>
-  <key>CFBundleShortVersionString</key><string>0.4.1</string>
+  <key>CFBundleShortVersionString</key><string>0.5.0</string>
   <key>CFBundleIconFile</key><string>AppIcon</string>
   <key>LSUIElement</key><true/>
   <key>NSHighResolutionCapable</key><true/>
+  <!-- BLE 桥接（DeviceBridge.swift）：缺此键时 CBCentralManager 创建即崩（TCC 拒绝） -->
+  <key>NSBluetoothAlwaysUsageDescription</key>
+  <string>连接 FoloToy AI Passport 宠物设备，推送任务状态与接收按键事件</string>
 </dict>
 </plist>
 EOF

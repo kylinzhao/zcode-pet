@@ -107,6 +107,21 @@ SessionStart/LaunchAgent ────双通道保活──────▶ 悬浮
   不能用 `updated_at` 变化当完成信号——用户点击任务列表也会 bump 它。
 - **点击跳转** = `zcode://workspace/open?path=<工作区>`（ZCode 唯一可用的深链，无任务级深链）。
 
+## ESP32 设备桥接（可选）
+
+任务状态可镜像到 FoloToy AI Passport（ESP32-C3 小屏）设备：守护进程（`daemon/DeviceBridge.swift`）
+以 **BLE GATT 中心角色**（CoreBluetooth）扫描/连接常驻广播的设备（固件为 NimBLE 外设，
+在 ai-passport 仓库），把与宠物文案同源的 PetDisplayState 快照推给设备——`status` 单行
+JSON ≤512B 走 write-with-response（preferred MTU 256，无需自定义分块），订阅 TX notify
+= online，断开自动退避重扫（0/1/2/5s），10s 无设备包判死重连。设备 OK 键的已读回执
+（`read`）走本地水位文件，不改写 ZCode DB。桌面仍是唯一权威：设备只做「状态镜像 +
+帧播放器」，零本地计数。
+
+- 协议/UUID/消息字段契约：`daemon/DeviceBridge.swift` 头注释（与固件 `zcp_bridge.h` 逐字节对应）
+- 固定校验：`bash scripts/check_esp32_bridge.sh`（编译 + 协议自检 + 文案同步 + 跨仓 UUID 一致性）
+- 桌面侧部署：`bash scripts/deploy_pet_mac.sh`（重建守护进程 + LaunchAgent 重启；首次需授权蓝牙）
+- 设备资产/固件：`scripts/gen_device_assets.sh`（烘焙动画帧包与中文字体子集入库 ai-passport）
+
 ## 已知限制
 
 - 依赖 ZCode 的非公开接口（sqlite schema、hook 事件），ZCode 大版本升级后若失效，先跑 `--test`。
@@ -120,6 +135,7 @@ bash scripts/install.sh    # 改 daemon/main.swift 后重跑即重新编译部�
 ```
 
 - 守护进程：`daemon/main.swift`（Swift/AppKit 单文件，皮肤表 `petSkins`、轮询状态机）
+- 设备桥接：`daemon/DeviceBridge.swift`（CoreBluetooth 中心；`--bridge-selftest` 无 GUI 自检）
 - 插件：`plugins/zcode-pet/`（SessionStart 拉起守护进程、UserPromptSubmit/Stop 转发回合事件）
 - **球球一族**（`animated` 皮肤）：纯矢量 CoreGraphics 绘制（`PetArt.drawVector`），不走资产；
   由 12fps tick 逐帧重绘实现眨眼（6~14s 随机、过冲回弹）、呼吸（±1%）、嘴型（微笑/抿嘴/大笑/撇嘴/波浪嘴）
