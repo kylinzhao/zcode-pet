@@ -59,6 +59,12 @@
 //     等比缩放（0.6×~2.2×，右下角锚定不动），双击手柄恢复默认；倍率持久化到 state.json，
 //     子视图帧/字号/圆角/位图密度全部随倍率重排（文案字号 10pt 下限 + 最多两行折行，
 //     缩太小仍可读）。
+// v1.6 ESP32 桌面桥接：抽出 PetDisplayState 快照（mode/tier/run/unread/mid/文案）作为
+//     宠物文案与设备的单一语义源，daemon/Esp32Bridge.swift 经 UDP/8765 把快照推给
+//     FoloToy AI Passport 设备镜像播放（hello 学 IP / 2s status / 6s 无 ACK 降级广播 /
+//     10s 判离线 / read 走本地已读水位）；--export-esp32 用 PetArt 引擎离线烘焙 12 段
+//     锁相循环 clip 成 .zpf 帧包（ZPF1，16 色 RGB565 + 1bpp 掩码 RLE + 4bpp 索引）。
+//     校验：scripts/check_esp32_bridge.sh。
 //
 // 构建：bash scripts/install.sh（编译进 .app bundle + ad-hoc 签名）；自检：--test。
 
@@ -73,6 +79,7 @@ struct PetConfig {
     var busyStaleSeconds: TimeInterval    // 看门狗：忙碌会话超过此时长无事件则静默丢弃
     var confirmDelay: TimeInterval        // turn_end 后等 DB 落库的确认延迟
     var zcodeAppBundleId: String
+    var bridgeEnabled: Bool               // ESP32 桥接（udp/8765 推状态给设备镜像）
 
     static let dataDir = NSHomeDirectory() + "/.zcode-pet"
 
@@ -82,7 +89,8 @@ struct PetConfig {
             pollInterval: 2.0,
             busyStaleSeconds: 2 * 3600,
             confirmDelay: 4.0,
-            zcodeAppBundleId: "dev.zcode.app"
+            zcodeAppBundleId: "dev.zcode.app",
+            bridgeEnabled: true
         )
         let url = URL(fileURLWithPath: dataDir + "/config.json")
         guard let data = try? Data(contentsOf: url),
@@ -91,6 +99,7 @@ struct PetConfig {
         if let v = obj["pollInterval"] as? Double, v >= 0.5 { c.pollInterval = v }
         if let v = obj["busyStaleSeconds"] as? Double { c.busyStaleSeconds = v }
         if let v = obj["zcodeAppBundleId"] as? String { c.zcodeAppBundleId = v }
+        if let v = obj["bridge"] as? Bool { c.bridgeEnabled = v }
         return c
     }
 }
@@ -173,6 +182,69 @@ struct PetState {
 // MARK: - Helpers
 
 enum PetMode { case idle, working, celebrate, error }
+
+// MARK: - 显示状态快照（宠物文案 / ESP32 桥接共用的单一语义源）
+//
+// mid 是闭集文案枚举 id：1-11 与 15 = sync 区（桌面 update() 12 条合成文案的去 emoji
+// 投影，见 scripts/device_strings.txt），12-14/16 = 设备专属区。判定顺序或文案改动后
+// 必须跑 scripts/check_esp32_bridge.sh（同步断言逐条比对桌面投影与文件）。
+
+struct PetDisplayState: Equatable {
+    let mode: PetMode
+    let tier: Int      // 忙碌档位 0..3（与 PetArt.workTier 同式归档）
+    let run: Int       // 执行中任务数
+    let unread: Int    // 完成未读数
+    let mid: Int
+    let n: Int?        // 文案数字模板参数（并行任务数 / 连击数）
+
+    /// 由模式/计数 + PetArt 动态参数推导；判定顺序与桌面 update() 文案分支逐字一致
+    /// （idle 子态：deep > aftermath > drowsy；working：impatient > 计数分档）
+    static func snapshot(mode: PetMode, run: Int, unread: Int) -> PetDisplayState {
+        let tier = mode == .working ? (run >= 4 ? 3 : max(1, run)) : 0
+        let mid: Int
+        var n: Int?
+        switch mode {
+        case .idle:
+            if PetArt.deepSleep > 0.55 { mid = 1 }
+            else if PetArt.aftermath > 0.3 { mid = 2 }
+            else if PetArt.drowsiness > 0.8 { mid = 3 }
+            else { mid = 4 }
+        case .working:
+            if PetArt.impatience > 0.4 { mid = 5 }
+            else if run == 1 { mid = 6 }
+            else if (2...3).contains(run) { mid = 7 }
+            else if run > 0 { mid = 8 }
+            else { mid = 9 }
+            if mid == 7 || mid == 8 { n = run }
+        case .celebrate:
+            if PetArt.comboCount >= 3 { mid = 11; n = PetArt.comboCount } else { mid = 10 }
+        case .error:
+            mid = 15
+        }
+        return PetDisplayState(mode: mode, tier: tier, run: run, unread: unread, mid: mid, n: n)
+    }
+
+    /// 桌面文案（含 emoji 与未读后缀；设备端由 mid 走 device_strings.txt 渲染去 emoji 投影）
+    var caption: String {
+        let base: String
+        switch mid {
+        case 1: base = "呼呼大睡 😴"
+        case 2: base = "有点委屈 😾"
+        case 3: base = "打盹中 zZ"
+        case 4: base = "休息中 💤"
+        case 5: base = "任务跑了好久了…"
+        case 6: base = "专注工作中…"
+        case 7: base = "\(run) 个任务并行中…"
+        case 8: base = "\(run) 个任务！忙翻了"
+        case 9: base = "执行中…"
+        case 10: base = "任务完成！"
+        case 11: base = "连击 ×\(n ?? 0) 完成！！"
+        default: base = "任务出错了 ⚠️"
+        }
+        if mode == .idle, unread > 0 { return "\(base) · \(unread) 未读" }
+        return base
+    }
+}
 
 // MARK: - 宠物造型（emoji 皮肤 + 手绘皮肤）
 
@@ -430,8 +502,9 @@ enum PetArt {
                        blue: mix(s.blueComponent), alpha: 1)
     }
 
-    /// 确定性伪随机 0..1（SplitMix64）：眨眼/呵欠时刻序列固定，静态导出与运行时一致
-    private static func ballHash(_ k: Int) -> CGFloat {
+    /// 确定性伪随机 0..1（SplitMix64）：眨眼/呵欠时刻序列固定，静态导出与运行时一致。
+    /// --export-esp32 选眨眼基线时复用同一哈希序列（时刻表单一来源，勿改步进公式）
+    static func ballHash(_ k: Int) -> CGFloat {
         var x = UInt64(truncatingIfNeeded: k) &+ 0x9E3779B97F4A7C15
         x ^= x >> 30; x &*= 0xBF58476D1CE4E5B9
         x ^= x >> 27; x &*= 0x94D049BB133111EB
@@ -1041,6 +1114,421 @@ enum PetArt {
     }
 }
 
+// MARK: - ESP32 帧包导出（--export-esp32 <dir>）
+//
+// 把矢量皮肤按 12 段 clip 烘焙成 .zpf 帧包，离线产出、入库提交，设备端零手绘贴图。
+// 【单一矢量源】全部帧由 PetArt.drawVector 渲染（与 --render-art 同引擎），任意帧确定性可复现。
+// 【循环锁相】浮动/呼吸/视线相位取 clip 时长整数倍（celebrate 4 个 |sin| 周期、error 18 周期、
+//   idle 呼吸 1 周期/T）；眨眼/呵欠按时刻表（ballHash 固定序列）选基线整体平移进循环窗内，
+//   接缝用「帧 0 vs 帧 T」回绕自检量化并打印——汗滴（working2/3）与 zZ（drowsy）周期与
+//   8fps 不可整除，存在亚像素级余差，属已知已知项，逐 clip 如实报告。
+// 【ZPF1 格式】小端：
+//   u8[4] magic "ZPF1" | u8 fps | u8 pad | u16 width | u16 height | u16 frameCount
+//   u16[16] 调色板 RGB565（index0=透明占位，index15=bgRGB565 压平底色）
+//   每帧：u32 payloadLen + 掩码 RLE（u8：bit7=不透明值，bit6..0=游程-1，覆盖 W×H 全部像素）
+//         + 不透明像素 4bpp 索引流（行优先自顶向下，高 nibble 在前）
+//   半分辨率 118×76 + 设备端 2× 最近邻上采样到 236×152（LVGL draw-event 流式 blit）。
+//   半透明像素按 alpha 压平到 bgRGB565（#1A1A1A）后量化——设备宠物页底色必须同色。
+
+enum Esp32Exporter {
+    static let width = 118
+    static let height = 76
+    static let fps = 8
+    /// 设备端宠物画布底色（协议常量 #1A1A1A → RGB565），与桌面宠物面板深色卡同族
+    static let bgRGB565: UInt16 = 0x18C3
+    /// 浮动烘焙的像素上限（位图 76px 高、画布近乎满幅，桌面 ±12pt 的庆祝跳动放不下：
+    /// 超限封顶并告警，见 clip 汇总表的 bobCap 列）
+    static let maxBobPx: CGFloat = 4
+
+    /// 固定 16 色调色板（RGB888，写入转 RGB565）：皮肤色系固定，免量化漂移。
+    /// 取自 PetArt 常量（体色/三情绪/内耳粉/腮红/海苔/彩带绿/汗滴/心心/体色亮暗档/白/墨/bg）
+    static let palette: [(UInt8, UInt8, UInt8)] = [
+        (0x00, 0x00, 0x00), // 0  透明占位（不出现在索引流）
+        (0xF3, 0xF0, 0xEA), // 1  idle 体色
+        (0xFF, 0xFF, 0xFF), // 2  白（高光 / zZ）
+        (0x1A, 0x1A, 0x1A), // 3  墨色
+        (0x7F, 0xA8, 0xEE), // 4  working 蓝
+        (0xF5, 0xB1, 0x3F), // 5  celebrate 金
+        (0xF9, 0x70, 0x5C), // 6  error 珊瑚
+        (0xF2, 0xB8, 0xC6), // 7  内耳粉
+        (0xEE, 0x9B, 0x9B), // 8  腮红
+        (0xF6, 0xF3, 0xEF), // 9  体色亮档（渐变 +0.22）
+        (0xD6, 0xD3, 0xCE), // 10 体色暗档（渐变 -0.12）
+        (0x8C, 0xC6, 0x9E), // 11 彩带软绿
+        (0x33, 0x50, 0x33), // 12 海苔绿
+        (0xBF, 0xE3, 0xF7), // 13 汗滴蓝
+        (0xFA, 0x99, 0xB3), // 14 心心粉
+        (0x1A, 0x1A, 0x1A), // 15 设备底色（压平目标 = bgRGB565）
+    ]
+
+    struct Clip {
+        let name: String
+        let mode: PetMode
+        let frames: Int
+        let blinkActive: Bool   // 眼型走 blinkOpenness 分支（需选基线防跨缝）
+        let wantYawn: Bool      // 要求一次完整呵欠烘焙进循环（drowsy）
+        let oneShot: Bool       // 单发语义（perk 小跳）：回绕差是设计内，不计接缝告警
+        let paint: (CGFloat) -> Void
+
+        init(name: String, mode: PetMode, frames: Int, blinkActive: Bool,
+             wantYawn: Bool = false, oneShot: Bool = false, paint: @escaping (CGFloat) -> Void) {
+            self.name = name; self.mode = mode; self.frames = frames
+            self.blinkActive = blinkActive; self.wantYawn = wantYawn
+            self.oneShot = oneShot; self.paint = paint
+        }
+    }
+
+    /// 12 段 clip（fps=8，共 356 帧）。形象级缺口（桌面 14 帧里的 impatient/combo/dangle）
+    /// 不单列：烦躁沿用 working 帧、连击由 celebrate + mid=11 文案承载、设备无拖拽。
+    static func clips() -> [Clip] {
+        func wander(_ t: CGFloat, T: CGFloat, k: CGFloat, ax: CGFloat, ay: CGFloat) {
+            // 漫游视线锁相版（桌面 updateGaze 的固定参数投影：设备无鼠标）
+            PetArt.gaze = CGPoint(x: ax * sin(2 * .pi * k * t / T),
+                                  y: ay * sin(2 * .pi * k * t / T + 1.7))
+        }
+        return [
+            Clip(name: "idle", mode: .idle, frames: 48, blinkActive: true, wantYawn: false, paint: { t in
+                wander(t, T: 6, k: 1, ax: 0.7, ay: 0.3)
+            }),
+            // 帧数 36（4.5s）：zZ 周期 1/0.22s，4.5s 恰推进 0.99 周期（5s 会剩 0.1 的接缝跳变）
+            Clip(name: "drowsy", mode: .idle, frames: 36, blinkActive: true, wantYawn: true, paint: { t in
+                PetArt.drowsiness = 1
+                wander(t, T: 4.5, k: 1, ax: 0.5, ay: 0.2)   // T 与帧数一致（36 帧 = 4.5s）
+            }),
+            Clip(name: "deep", mode: .idle, frames: 36, blinkActive: false, wantYawn: false, paint: { _ in
+                PetArt.drowsiness = 1; PetArt.deepSleep = 1   // 闭眼弧 + 4 颗 z（呵欠被 deepSleep 抑制）
+            }),
+            Clip(name: "working1", mode: .working, frames: 32, blinkActive: true, wantYawn: false, paint: { t in
+                PetArt.workTier = 1
+                wander(t, T: 4, k: 1, ax: 0.7, ay: 0.3)
+            }),
+            Clip(name: "working2", mode: .working, frames: 32, blinkActive: true, wantYawn: false, paint: { t in
+                PetArt.workTier = 2
+                wander(t, T: 4, k: 2, ax: 0.85, ay: 0.12)     // 并行：视线扫两块屏（锁相 2 周期）
+            }),
+            Clip(name: "working3", mode: .working, frames: 32, blinkActive: true, wantYawn: false, paint: { t in
+                PetArt.workTier = 3
+                wander(t, T: 4, k: 3, ax: 0.85, ay: 0.35)     // 忙翻：急促乱瞟（锁相 3 周期）
+            }),
+            Clip(name: "celebrate", mode: .celebrate, frames: 20, blinkActive: false, paint: { _ in
+                // comboCount 保持 0：彩带周期随机（1.1~2.0s）与 T 不可整除，循环缝会弹入弹出；
+                // 且方案已声明 combo 形象缺口——连击语义由 mid=11 文案承载
+            }),
+            Clip(name: "error", mode: .error, frames: 24, blinkActive: false, wantYawn: false, paint: { _ in }),
+            Clip(name: "pat", mode: .idle, frames: 16, blinkActive: false, wantYawn: false, paint: { _ in
+                PetArt.pat = 1                                 // 摸头笑眼+心心（心心周期恰 2s = T，无接缝）
+            }),
+            Clip(name: "perk", mode: .idle, frames: 8, blinkActive: true, oneShot: true, paint: { t in
+                PetArt.perk = max(0, 1 - t)                    // 开工小跳一次性播完（1s 单发）
+            }),
+            Clip(name: "aftermath", mode: .idle, frames: 32, blinkActive: true, wantYawn: false, paint: { _ in
+                PetArt.aftermath = 0.8                         // 桌面 50s 渐复在设备压平为恒定委屈（配 mid=2）
+            }),
+            Clip(name: "wait", mode: .idle, frames: 32, blinkActive: true, wantYawn: false, paint: { t in
+                PetArt.drowsiness = 0.3                        // 离线等待：微垂眼漫游（mid=13/16 配文）
+                wander(t, T: 4, k: 1, ax: 0.6, ay: 0.25)
+            }),
+        ]
+    }
+
+    /// 浮动偏移（点）：复刻桌面 tick 的 freq/amp 表，相位锁相成整周期
+    static func bobDY(clip: Clip, t: CGFloat, scale: CGFloat) -> CGFloat {
+        let T = CGFloat(clip.frames) / CGFloat(fps)
+        let phase = 2 * .pi * t / T
+        func sinL(_ cycles: CGFloat, _ amp: CGFloat) -> CGFloat { amp * sin(phase * cycles) }
+        var dy: CGFloat
+        switch clip.mode {
+        case .working:
+            switch PetArt.workTier {
+            case 3: dy = sinL(7, 5)      // 运行时 1.7Hz×4s=6.8 → 取 7
+            case 2: dy = sinL(5, 6)      // 1.25Hz×4s=5 整
+            default: dy = sinL(3, 4)     // 0.8Hz×4s=3.2 → 取 3
+            }
+        case .celebrate: dy = -12 * abs(sin(phase * 2))   // 2 圈相位 = 恰 4 个 |sin| 周期
+        case .error: dy = sinL(18, 2)                     // 6Hz×3s 恰 18 周期
+        case .idle: dy = sinL(1, 2 + 1.5 * PetArt.drowsiness + 1.5 * PetArt.deepSleep)
+        }
+        dy -= 7 * sin(.pi * (1 - PetArt.perk))            // 开工小跳（幅度取清醒档）
+        return dy * scale
+    }
+
+    // MARK: 眨眼/呵欠基线（时刻表与 PetArt.blinkOpenness / yawnAmount 同源）
+
+    /// 选 ballTime 基线 B：眨眼/呵欠窗（0.55s / 2.6s）整体平移进 [B, B+T) 且不跨缝；
+    /// wantYawn 时强制一次完整呵欠落在窗内，否则任何相交都排除
+    static func ballBaseline(for clip: Clip) -> CGFloat {
+        let T = CGFloat(clip.frames) / CGFloat(fps)
+        let drowsy = PetArt.drowsiness   // paint(0) 已注入（呵欠间隔随困意缩水）
+        var blinks: [CGFloat] = []
+        var s: CGFloat = 3.2, k = 0
+        while s < 90 { blinks.append(s); s += 6 + PetArt.ballHash(k &+ 77) * 8; k += 1 }
+        var yawns: [CGFloat] = []
+        s = 9.0; k = 0
+        while s < 90 { yawns.append(s); s += (22 + PetArt.ballHash(k &+ 913) * 12) * (1 - 0.62 * drowsy); k += 1 }
+
+        var B: CGFloat = 0
+        while B <= 90 {
+            var ok = true
+            if clip.blinkActive {
+                for w in blinks where ok {
+                    let (a, b) = (w, w + 0.55)
+                    if (a < B && b > B) || (a < B + T && b > B + T) { ok = false }
+                }
+            }
+            for w in yawns where ok {
+                let (a, b) = (w, w + 2.6)
+                if (a < B && b > B) || (a < B + T && b > B + T) { ok = false }
+            }
+            if ok, clip.wantYawn,
+               !yawns.contains(where: { $0 >= B && $0 + 2.6 <= B + T }) { ok = false }
+            if ok { return B }
+            B += 0.25
+        }
+        return 0
+    }
+
+    // MARK: 位图渲染与像素读回
+
+    private static func makeRep(pixelsWide: Int, pixelsHigh: Int) -> NSBitmapImageRep {
+        NSBitmapImageRep(bitmapDataPlanes: nil, pixelsWide: pixelsWide, pixelsHigh: pixelsHigh,
+                         bitsPerSample: 8, samplesPerPixel: 4, hasAlpha: true, isPlanar: false,
+                         colorSpaceName: .deviceRGB, bytesPerRow: 0, bitsPerPixel: 0)!
+    }
+
+    /// 位图内存布局探针：确认首行内存对应画布顶/底、通道序、预乘——跨版本默认值有变时
+    /// 在此硬失败而不是导出错向帧
+    static func probeLayout() -> (topFirst: Bool, rgbaOrder: Bool, premultiplied: Bool)? {
+        let rep = makeRep(pixelsWide: 8, pixelsHigh: 8)
+        NSGraphicsContext.saveGraphicsState()
+        NSGraphicsContext.current = NSGraphicsContext(bitmapImageRep: rep)
+        NSColor.red.setFill()                                  // AppKit 原点左下
+        NSBezierPath(rect: NSRect(x: 0, y: 0, width: 2, height: 2)).fill()
+        NSColor.blue.setFill()
+        NSBezierPath(rect: NSRect(x: 0, y: 6, width: 2, height: 2)).fill()
+        NSColor.white.withAlphaComponent(0.5).setFill()        // 预乘探针
+        NSBezierPath(rect: NSRect(x: 3, y: 3, width: 2, height: 2)).fill()
+        NSGraphicsContext.restoreGraphicsState()
+
+        guard rep.bitsPerPixel == 32, let d = rep.bitmapData else { return nil }
+        let bpr = rep.bytesPerRow
+        let row0 = Array(UnsafeBufferPointer(start: d, count: 8))
+        func isRed(_ p: [UInt8]) -> Bool { p[3] == 255 && p[0] > 200 && p[1] < 50 && p[2] < 50 }
+        func isBlue(_ p: [UInt8]) -> Bool { p[3] == 255 && p[2] > 200 && p[0] < 50 && p[1] < 50 }
+        let row0IsBlue = isBlue(Array(row0[0..<4])) || isBlue(Array(row0[4..<8]))
+        let row0IsRed = isRed(Array(row0[0..<4])) || isRed(Array(row0[4..<8]))
+        guard row0IsBlue != row0IsRed else { return nil }
+        // 通道序：取 row0 第一个不透明像素，纯红 → R 在前；纯蓝 → B 在前
+        let first = row0[3] == 255 ? Array(row0[0..<4]) : Array(row0[4..<8])
+        let rgbaOrder = first[0] > 200
+        let mid = Array(UnsafeBufferPointer(start: d + bpr * 3 + 3 * 4, count: 4))
+        let a = Int(mid[3])
+        let premultiplied = a > 0 && a < 250 && Int(mid[0]) <= a + 2 && Int(mid[1]) <= a + 2
+        return (topFirst: row0IsBlue, rgbaOrder: rgbaOrder, premultiplied: premultiplied)
+    }
+
+    struct PixelReader {
+        let base: UnsafeMutablePointer<UInt8>
+        let bytesPerRow: Int
+        let topFirst: Bool
+        let rgbaOrder: Bool
+        let premultiplied: Bool
+        let w: Int, h: Int
+
+        /// (x, yTop) → RGBA 0..255（统一转成非预乘）
+        func at(x: Int, yTop: Int) -> (Int, Int, Int, Int) {
+            let row = topFirst ? yTop : (h - 1 - yTop)
+            let o = row * bytesPerRow + x * 4
+            var r = Int(base[o]), g = Int(base[o + 1]), b = Int(base[o + 2])
+            let a = Int(base[o + 3])
+            if !rgbaOrder { swap(&r, &b) }
+            if premultiplied, a > 0 {
+                r = min(255, r * 255 / a); g = min(255, g * 255 / a); b = min(255, b * 255 / a)
+            }
+            return (r, g, b, a)
+        }
+    }
+
+    private static func reader(_ rep: NSBitmapImageRep, probe: (Bool, Bool, Bool)) -> PixelReader {
+        PixelReader(base: rep.bitmapData!, bytesPerRow: rep.bytesPerRow,
+                    topFirst: probe.0, rgbaOrder: probe.1, premultiplied: probe.2,
+                    w: rep.pixelsWide, h: rep.pixelsHigh)
+    }
+
+    private static func renderFrame(skin: PetSkin, clip: Clip, t: CGFloat, baseline: CGFloat,
+                                    dyPx: CGFloat, scale: CGFloat, probe: (Bool, Bool, Bool)) -> PixelReader {
+        let rep = makeRep(pixelsWide: width, pixelsHigh: height)
+        NSGraphicsContext.saveGraphicsState()
+        NSGraphicsContext.current = NSGraphicsContext(bitmapImageRep: rep)
+        PetArt.render(art: skin.art!, mode: clip.mode,
+                      in: NSRect(x: 0, y: dyPx / scale, width: CGFloat(width), height: CGFloat(height)))
+        NSGraphicsContext.restoreGraphicsState()
+        return reader(rep, probe: probe)
+    }
+
+    // MARK: 量化与编码
+
+    static func rgb565(_ r: UInt8, _ g: UInt8, _ b: UInt8) -> UInt16 {
+        UInt16(r >> 3) << 11 | UInt16(g >> 2) << 5 | UInt16(b >> 3)
+    }
+
+    static func nearestPalette(_ r: CGFloat, _ g: CGFloat, _ b: CGFloat) -> UInt8 {
+        var best: UInt8 = 1
+        var bestD = CGFloat.greatestFiniteMagnitude
+        for i in 1..<palette.count {
+            let p = palette[i]
+            let dr = r - CGFloat(p.0), dg = g - CGFloat(p.1), db = b - CGFloat(p.2)
+            let d = dr * dr * 0.30 + dg * dg * 0.59 + db * db * 0.11
+            if d < bestD { bestD = d; best = UInt8(i) }
+        }
+        return best
+    }
+
+    /// 帧编码：返回 RLE 掩码 + 4bpp 索引流 + flat[y*width+x]（0=透明，否则调色板 1..15，
+    /// 供回绕自检逐像素比对）
+    private static func encodeFrame(_ px: PixelReader) -> (mask: [UInt8], idx: [UInt8], flat: [UInt8]) {
+        var mask: [UInt8] = []
+        var curValue: UInt8 = 0
+        var curRun: UInt8 = 0
+        func flush() {
+            if curRun > 0 { mask.append(curValue << 7 | (curRun - 1)); curRun = 0 }
+        }
+        var idx: [UInt8] = []
+        var loNibble = false
+        var flat = [UInt8](repeating: 0, count: width * height)
+        for y in 0..<height {          // 行优先自顶向下（设备 blit 顺序）
+            for x in 0..<width {
+                let (r, g, b, a) = px.at(x: x, yTop: y)
+                var value: UInt8 = 0
+                if a >= 10 {
+                    let alpha = CGFloat(a) / 255
+                    let rr = CGFloat(r) * alpha + CGFloat(palette[15].0) * (1 - alpha)
+                    let gg = CGFloat(g) * alpha + CGFloat(palette[15].1) * (1 - alpha)
+                    let bb = CGFloat(b) * alpha + CGFloat(palette[15].2) * (1 - alpha)
+                    let q = nearestPalette(rr, gg, bb)
+                    precondition(q >= 1 && q < 16, "调色板索引越界 \(q)")
+                    flat[y * width + x] = q
+                    if loNibble { idx[idx.count - 1] |= q } else { idx.append(q << 4) }
+                    loNibble.toggle()
+                    value = 1
+                }
+                if value == curValue, curRun < 127 {
+                    curRun += 1
+                } else {
+                    flush()
+                    curValue = value
+                    curRun = 1
+                }
+            }
+        }
+        flush()
+        return (mask, idx, flat)
+    }
+
+    // MARK: 导出入口
+
+    @discardableResult
+    static func exportAll(to dir: String, skins: [String] = ["ball"]) -> Int32 {
+        print("export-esp32 → \(dir) (fps \(fps), \(width)×\(height), ZPF1)")
+        guard let probe = probeLayout() else {
+            print("✗ 位图布局探针失败：AppKit 位图内存布局不符合任一已知排列")
+            return 1
+        }
+        print("  probe: rows=\(probe.topFirst ? "top-first" : "bottom-first") " +
+              "order=\(probe.rgbaOrder ? "RGBA" : "BGRA") premult=\(probe.premultiplied)")
+        try? FileManager.default.createDirectory(atPath: dir, withIntermediateDirectories: true)
+
+        let scale = min(CGFloat(width) / PetArt.W, CGFloat(height) / PetArt.H)
+        var failures = 0
+        var totalFrames = 0
+        var totalBytes = 0
+
+        for skinId in skins {
+            guard let skin = petSkins.first(where: { $0.id == skinId }), skin.art != nil else {
+                print("✗ 皮肤 \(skinId) 不存在或非矢量皮肤（导出仅支持 animated 家族）")
+                failures += 1
+                continue
+            }
+            print("  skin \(skinId):")
+            print("  clip        frames  bytes    baseline  wrapDiff  bobCap")
+            for clip in clips() {
+                let T = CGFloat(clip.frames) / CGFloat(fps)
+                PetArt.resetDynamic()
+                clip.paint(0)
+                let baseline = ballBaseline(for: clip)
+
+                // 回绕自检：帧 0 vs 帧 T（锁相项全等；汗滴/zZ 等不可整除周期在此量化）
+                PetArt.resetDynamic(); clip.paint(0); PetArt.ballTime = baseline; PetArt.breathePhase = 0
+                let a = encodeFrame(renderFrame(skin: skin, clip: clip, t: 0, baseline: baseline,
+                                                dyPx: 0, scale: scale, probe: probe))
+                PetArt.resetDynamic(); clip.paint(T); PetArt.ballTime = baseline + T
+                PetArt.breathePhase = 1
+                let bt = encodeFrame(renderFrame(skin: skin, clip: clip, t: T, baseline: baseline,
+                                                 dyPx: bobDY(clip: clip, t: T, scale: scale),
+                                                 scale: scale, probe: probe))
+                var diff = 0
+                for p in 0..<(width * height) where a.flat[p] != bt.flat[p] { diff += 1 }
+                let wrapPct = Double(diff) / Double(width * height) * 100
+
+                var data = Data()
+                func u16le(_ v: UInt16) { withUnsafeBytes(of: v.littleEndian) { data.append(contentsOf: $0) } }
+                func u32le(_ v: UInt32) { withUnsafeBytes(of: v.littleEndian) { data.append(contentsOf: $0) } }
+                data.append(contentsOf: "ZPF1".utf8)
+                data.append(UInt8(fps)); data.append(0)
+                u16le(UInt16(width)); u16le(UInt16(height)); u16le(UInt16(clip.frames))
+                for p in palette { u16le(rgb565(p.0, p.1, p.2)) }
+
+                var capped = 0
+                var framePayload = 0
+                for i in 0..<clip.frames {
+                    let t = CGFloat(i) / CGFloat(fps)
+                    PetArt.resetDynamic()
+                    clip.paint(t)
+                    PetArt.ballTime = baseline + t
+                    PetArt.breathePhase = t / T        // 呼吸锁 1 周期/T
+                    var dyPx = bobDY(clip: clip, t: t, scale: scale)
+                    if dyPx > maxBobPx { dyPx = maxBobPx; capped += 1 }
+                    if dyPx < -maxBobPx { dyPx = -maxBobPx; capped += 1 }
+                    let frame = encodeFrame(renderFrame(skin: skin, clip: clip, t: t, baseline: baseline,
+                                                        dyPx: dyPx, scale: scale, probe: probe))
+                    // 结构自检：掩码游程覆盖全部像素；4bpp 流与不透明像素一一对应
+                    let runSum = frame.mask.reduce(0) { $0 + Int($1 & 0x7F) + 1 }
+                    let opaqueCount = frame.flat.filter { $0 > 0 }.count
+                    precondition(runSum == width * height, "掩码游程 \(runSum) ≠ \(width * height)")
+                    precondition(frame.idx.count == (opaqueCount + 1) / 2,
+                                 "索引流 \(frame.idx.count)B ≠ 不透明 \(opaqueCount)px")
+                    let payload = frame.mask.count + frame.idx.count
+                    u32le(UInt32(payload))
+                    data.append(contentsOf: frame.mask)
+                    data.append(contentsOf: frame.idx)
+                    framePayload += payload + 4
+                }
+                let path = (dir as NSString).appendingPathComponent("\(skinId)-\(clip.name).zpf")
+                do {
+                    try data.write(to: URL(fileURLWithPath: path))
+                } catch {
+                    print("✗ 写入失败 \(path): \(error)")
+                    failures += 1
+                    continue
+                }
+                totalFrames += clip.frames
+                totalBytes += data.count
+                let warn = (wrapPct > 1.0 && !clip.oneShot) ? " ⚠️接缝" : (clip.oneShot ? " 单发" : "")
+                print("  \(clip.name.padding(toLength: 10, withPad: " ", startingAt: 0)) " +
+                      "\(String(clip.frames).padding(toLength: 6, withPad: " ", startingAt: 0)) " +
+                      "\(String(data.count).padding(toLength: 8, withPad: " ", startingAt: 0)) " +
+                      "\(String(format: "%.2f", baseline).padding(toLength: 8, withPad: " ", startingAt: 0)) " +
+                      "\(String(format: "%.2f%%", wrapPct).padding(toLength: 8, withPad: " ", startingAt: 0)) " +
+                      "\(capped)\(warn)")
+            }
+        }
+        print("  共 \(totalFrames) 帧 / \((Double(totalBytes) / 1024 / 1024 * 100).rounded() / 100) MB")
+        print("  调色板 16 色 RGB565（index0=透明）；底色常量 bg=#1A1A1A(0x\(String(bgRGB565, radix: 16)))" +
+              "——设备宠物页底色必须同色")
+        print("  形象级缺口（方案内声明）：impatient→working 帧、combo→celebrate+mid11 文案、dangle 无设备场景")
+        return failures == 0 ? 0 : 1
+    }
+}
+
 // MARK: - App 图标（跟随宠物皮肤）
 //
 // 应用图标（访达/强制退出等处的身份标识）。切换皮肤时把新皮肤渲染成 icns 写回自己的
@@ -1525,29 +2013,9 @@ final class PetPanelController {
             emojiField.isHidden = false
             emojiField.stringValue = skin.emoji(for: mode)
         }
-        switch mode {
-        case .idle:
-            let base: String
-            if PetArt.deepSleep > 0.55 { base = "呼呼大睡 😴" }
-            else if PetArt.aftermath > 0.3 { base = "有点委屈 😾" }
-            else if PetArt.drowsiness > 0.8 { base = "打盹中 zZ" }
-            else { base = "休息中 💤" }
-            captionField.stringValue = unreadCount > 0 ? "\(base) · \(unreadCount) 未读" : base
-        case .working:
-            if PetArt.impatience > 0.4 {
-                captionField.stringValue = "任务跑了好久了…"
-            } else {
-                switch runningCount {
-                case 1: captionField.stringValue = "专注工作中…"
-                case 2...3: captionField.stringValue = "\(runningCount) 个任务并行中…"
-                default: captionField.stringValue = runningCount > 0 ? "\(runningCount) 个任务！忙翻了" : "执行中…"
-                }
-            }
-        case .celebrate:
-            captionField.stringValue = PetArt.comboCount >= 3 ? "连击 ×\(PetArt.comboCount) 完成！！" : "任务完成！"
-        case .error:
-            captionField.stringValue = "任务出错了 ⚠️"
-        }
+        // 文案判定单一来源：PetDisplayState（菜单栏快照与 ESP32 桥接同一条路径）
+        captionField.stringValue = PetDisplayState.snapshot(mode: mode, run: runningCount,
+                                                            unread: unreadCount).caption
     }
 
     /// 12fps 呼吸/跳动动画（拖拽中暂停——否则每 83ms 把窗口重置回 baseOrigin，拖拽失效）。
@@ -1898,9 +2366,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var lastStateSave = 0.0
     private var recentCompletions: [Double] = []   // 90s 内完成任务时刻（连击庆祝）
 
+    // v1.6 ESP32 桥接：设备 OK 已读水位 + UDP 状态推送（nil = config.json bridge:false 关闭）
+    private var bridge: Esp32Bridge?
+    private var ackedReadTs: Double = 0
+
     override init() {
         let cfg = PetConfig.load()
         store = TaskStore(path: cfg.dbPath)
+        ackedReadTs = ReadWatermark.load()
         super.init()
         AppDelegate.shared = self
     }
@@ -1921,6 +2394,21 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                                      self?.state.save()
                                  })
         eventTail = EventTail(path: PetConfig.dataDir + "/events.jsonl")
+
+        // ESP32 桥接：与宠物文案共用 PetDisplayState 快照；设备 OK 键走本地已读水位
+        if config.bridgeEnabled {
+            let b = Esp32Bridge()
+            b.stateProvider = { [weak self] in
+                guard let self else { return nil }
+                return PetDisplayState.snapshot(mode: self.currentMode(),
+                                                run: self.lastRunning.count,
+                                                unread: self.lastUnread.count)
+            }
+            b.onRead = { [weak self] in self?.markDeviceRead() }
+            b.linkDidChange = { [weak self] _ in self?.refreshDeviceTooltip() }
+            bridge = b
+            b.start()
+        }
 
         statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
         statusItem.button?.title = "🐾"
@@ -1945,7 +2433,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
     }
 
-    func applicationWillTerminate(_ notification: Notification) { state.save() }
+    func applicationWillTerminate(_ notification: Notification) {
+        bridge?.stop()
+        state.save()
+    }
 
     // MARK: hook 事件 → 回合状态机
 
@@ -2130,8 +2621,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     private func updateUI(displayIds: Set<String>, byId: [String: TaskRow]) {
         rowsById = byId
+        // 未读 = DB live 标记，且晚于设备 OK 已读水位（水位 0 = 从未确认，行为不变）
         let unread = byId.values
-            .filter { ($0.status == "completed" || $0.status == "error") && $0.unreadAtMs > 0 }
+            .filter { ($0.status == "completed" || $0.status == "error") && $0.unreadAtMs > ackedReadTs }
             .sorted { $0.unreadAtMs > $1.unreadAtMs }
         let running: [(title: String, id: String, ws: String)] = displayIds.map { id in
             let row = byId[id]
@@ -2142,9 +2634,28 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
         let m = currentMode()
         pet.update(mode: m, skin: skin, runningCount: running.count, unreadCount: unread.count)
+        // 桥接推同一快照（变化即时补发；2s 周期兜底在 bridge 自己的定时器里）
+        bridge?.push(PetDisplayState.snapshot(mode: m, run: running.count, unread: unread.count))
+        refreshDeviceTooltip()
         let base = running.isEmpty ? "🐾" : "🐾 \(running.count)"
         statusItem.button?.title = unread.isEmpty ? base : "\(base) 📬\(unread.count)"
         rebuildMenu(running: running, unread: lastUnread)
+    }
+
+    /// 设备 OK 键 = 已读确认：推进水位并立即刷新（桌面角标与设备镜像同一语义；
+    /// 不写 ZCode DB——用户在 ZCode 内打开任务才会真正清 DB 未读）
+    private func markDeviceRead() {
+        ackedReadTs = max(ackedReadTs, now() * 1000)
+        ReadWatermark.save(ms: ackedReadTs)
+        NSLog("[zcode-pet] device read ack → watermark %.0f", ackedReadTs)
+        guard let store else { return }
+        let rows = store.allTasks()
+        let byId = Dictionary(uniqueKeysWithValues: rows.map { ($0.id, $0) })
+        updateUI(displayIds: Set(busyIds).union(byId.filter { $0.value.status == "running" }.keys), byId: byId)
+    }
+
+    private func refreshDeviceTooltip() {
+        statusItem.button?.toolTip = bridge?.tooltip
     }
 
     private func rebuildMenu(running: [(title: String, id: String, ws: String)], unread: [TaskRow]) {
@@ -2339,6 +2850,23 @@ if let i = CommandLine.arguments.firstIndex(of: "--gen-icon"), CommandLine.argum
 // --render-art <dir>：导出全部手绘皮肤的 4 种状态 + 图标效果 PNG（画得对不对肉眼自检）
 if let i = CommandLine.arguments.firstIndex(of: "--render-art"), CommandLine.arguments.count > i + 1 {
     exit(PetArt.exportAll(to: CommandLine.arguments[i + 1]))
+}
+
+// --export-esp32 <dir> [--skins ball,cat]：烘焙设备端 .zpf 帧包（12 段锁相循环 clip，见
+// Esp32Exporter；gen_device_assets.sh 调用，产物默认落 ai-passport/main/assets/pet/）
+if let i = CommandLine.arguments.firstIndex(of: "--export-esp32"), CommandLine.arguments.count > i + 1 {
+    var skins = ["ball"]   // v1 只烘 ball（全家族约 12MB 超分区，需挑 2-3 款或改帧格式）
+    if let s = CommandLine.arguments.firstIndex(of: "--skins"), CommandLine.arguments.count > s + 1 {
+        skins = CommandLine.arguments[s + 1].split(separator: ",").map(String.init)
+    }
+    exit(Esp32Exporter.exportAll(to: CommandLine.arguments[i + 1], skins: skins))
+}
+
+// --bridge-selftest [device_strings.txt]：桥接协议/链路状态机/文案同步自检
+// （无 GUI、无网络、不开 socket；scripts/check_esp32_bridge.sh 调用）
+if let i = CommandLine.arguments.firstIndex(of: "--bridge-selftest") {
+    let path = i + 1 < CommandLine.arguments.count ? CommandLine.arguments[i + 1] : nil
+    exit(runBridgeSelfTest(stringsPath: path))
 }
 
 let app = NSApplication.shared

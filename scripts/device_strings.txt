@@ -1,0 +1,43 @@
+# zcode-pet ESP32 设备端闭集文案（唯一来源）
+#
+# 分两节：
+#   # sync:   同步区——与桌面 daemon/main.swift 的 update()（原 1528-1550 行）全部 12 条
+#             合成文案逐条对应的「去 emoji 投影」（mid 1-11 与 15）。桌面文案改动必须
+#             同步此区，scripts/check_esp32_bridge.sh 的桌面同步断言仅对此区生效。
+#   # device: 设备区——设备专属 UI 文案（mid 12/13/14/16、配网页、重试提示、清单浮层、
+#             顶栏模板、Boot 页等），无桌面来源，不受同步断言约束，但同样进字体子集。
+#
+# 语法：<key> = <text>。key 为数字（=协议 mid）或大写下划线符号名（固件引用）。
+# 模板 %d 由状态帧里的 n 参数填入（设备端 snprintf，数字走 Montserrat fallback）。
+# 全文（两节）所有码点进 lv_font_conv 字体子集——新增文案必须重跑 gen_device_assets.sh。
+# 禁止 emoji（思源黑体系字体无 emoji 字形）；字符白名单见 check_esp32_bridge.sh。
+
+# sync:
+1 = 呼呼大睡
+2 = 有点委屈
+3 = 打盹中 zZ
+4 = 休息中
+5 = 任务跑了好久了…
+6 = 专注工作中…
+7 = %d 个任务并行中…
+8 = %d 个任务！忙翻了
+9 = 执行中…
+10 = 任务完成！
+11 = 连击完成
+15 = 任务出错了
+
+# device:
+12 = 连接 WiFi 中…
+13 = 等待 Mac 连接…
+14 = Mac 掉线了…
+16 = 未发现 Mac · 检查同一 WiFi/隔离设置
+BOOT_TITLE = zcode-pet
+WIFI_OFFLINE = WiFi 断开 · 按 OK 重试
+RETRY_FMT = 重试中 %d/3 …
+LIST_FMT = 任务 %d · 未读 %d
+TOPBAR_FMT = 任务%d 未读%d
+CFG_TITLE = USB 配网
+CFG_HINT = USB 连接 Mac → 运行 provision_esp32.sh
+CFG_TIMEOUT = 未收到配置 · 长按 OK 再等
+CFG_SAVED = 已保存，连接中…
+CFG_SAVE_FAILED = 保存失败
