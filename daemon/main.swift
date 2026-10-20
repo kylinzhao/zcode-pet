@@ -2547,7 +2547,7 @@ enum ZCodeTaskJumper {
         attr(el, name) as? String
     }
 
-    /// 诊断 dump：有文本的节点记一行（role @x,y press? text），供 --ax-probe 概览
+    /// 诊断 dump：有文本的节点记一行（role @x,y actions | text），供 --ax-probe 概览
     private static func dumpTree(el: AXUIElement, depth: Int, out: inout [String], visited: inout Int) {
         guard visited < 4000, depth < 20 else { return }
         visited += 1
@@ -2556,9 +2556,10 @@ enum ZCodeTaskJumper {
         if !text.trimmingCharacters(in: .whitespaces).isEmpty {
             var p = CGPoint.zero
             if let v = attr(el, kAXPositionAttribute) { AXValueGetValue(v as! AXValue, .cgPoint, &p) }
-            let press = supportsPress(el) ? "Y" : "n"
             let role = copyStr(el, kAXRoleAttribute) ?? "?"
-            out.append("\(role) @\(Int(p.x)),\(Int(p.y)) press=\(press) | \(text.prefix(100))")
+            var acts: [String] = ["<no-attr>"]
+            if let v = attr(el, "AXActions"), let list = v as? [String] { acts = list }
+            out.append("\(role) @\(Int(p.x)),\(Int(p.y)) acts=\(acts.joined(separator: ",")) | \(text.prefix(100))")
         }
         var kids: CFTypeRef?
         guard AXUIElementCopyAttributeValue(el, kAXChildrenAttribute as CFString, &kids) == .success,
