@@ -70,6 +70,12 @@
 //     （0/1/2/5s），10s 无设备包判死重连；协议消息（hello/status/ack/read）字段不变；
 //     UDP 的 degraded 广播降级态取消（ATT 写回执本身逐包确认）。Info.plist 需
 //     NSBluetoothAlwaysUsageDescription（install.sh 模板已含）。
+// v1.7.1 任务级跳转修复（fixes #5）：清单/菜单点任务改走 ZCodeTaskJumper——AXManualAccessibility
+//     打开 Chromium web AX 树，按任务标题匹配侧边栏任务行，聚焦承载窗口后 AXPress（等价
+//     ZCode 原生推送点击的效果）；失败退回 --open-workspace。3.14.3 app.asar 实证：原生
+//     推送点击=主进程内部 IPC（TaskNotificationClick(taskId)+setActiveTaskId），外部只有
+//     workspace 级入口——--open-workspace 恒路由第一个窗口且不设 activeTaskId，工作区开在
+//     别窗就跳错。--ax-probe [标题子串] 真机探测 AX 链路（结果落 ~/.zcode-pet/ax-probe.log）。
 //
 // 构建：bash scripts/install.sh（编译进 .app bundle + ad-hoc 签名）；自检：--test。
 
@@ -160,6 +166,7 @@ struct PetState {
     var petOrigin: [Double]?                 // 宠物窗口位置持久化
     var skinId: String?                      // 宠物造型
     var petScale: Double?                    // 宠物大小倍率（左上角手柄拖拽调节，1=基准）
+    var lastAxGuideAt: Double = 0            // 上次自动引导辅助功能授权的时刻（7 天节流）
 
     static func path() -> String { PetConfig.dataDir + "/state.json" }
 
@@ -170,6 +177,7 @@ struct PetState {
         if let v = obj["petOrigin"] as? [Double], v.count == 2 { s.petOrigin = v }
         if let v = obj["skinId"] as? String { s.skinId = v }
         if let v = obj["petScale"] as? Double { s.petScale = v }
+        if let v = obj["lastAxGuideAt"] as? Double { s.lastAxGuideAt = v }
         return s
     }
 
@@ -178,6 +186,7 @@ struct PetState {
         if let petOrigin { obj["petOrigin"] = petOrigin }
         if let skinId { obj["skinId"] = skinId }
         if let petScale { obj["petScale"] = petScale }
+        if lastAxGuideAt > 0 { obj["lastAxGuideAt"] = lastAxGuideAt }
         if let data = try? JSONSerialization.data(withJSONObject: obj) {
             _ = try? data.write(to: URL(fileURLWithPath: PetState.path()))
         }
@@ -2372,6 +2381,202 @@ enum ZCodeActivator {
     }
 }
 
+// MARK: - ZCode 任务级跳转（AX 按侧边栏任务行，等价原生推送点击的效果）
+
+/// 3.14.3 app.asar 实证：原生推送点击 = 主进程内部 IPC——聚焦任务所在窗口 + 给该窗口
+/// renderer 发 TaskNotificationClick(taskId)，renderer 按 taskId 定位工作区 tab 并
+/// setActiveTaskId。外部进程拿不到这条通道，对外只有 workspace 级入口：
+/// zcode://workspace/open 弹「打开外部链接」确认框；--open-workspace 单实例转发恒路由到
+/// 第一个窗口（resolveApplicationWindow = Re()[0]）且不设 activeTaskId——任务的工作区
+/// 开在别的窗口时只会开重复 tab，跳错窗。所以任务级跳转走 AX：AXManualAccessibility 是
+/// Chromium 给辅助技术开的官方口子（VoiceOver 同款），设上后 web 内容进 AX 树，找到标题
+/// 匹配的任务行、聚焦承载窗口再 AXPress，完全等价用户手点侧边栏。AX 无授权时由调用方
+/// 退回 --open-workspace 的 workspace 级跳转。
+enum ZCodeTaskJumper {
+
+    struct Hit {
+        let el: AXUIElement        // 可按元素（任务行文本本身或其最近可点祖先）
+        let window: AXUIElement
+        let role: String
+        let text: String
+        let pos: CGPoint
+    }
+
+    static func runningZCode(bundleId: String) -> NSRunningApplication? {
+        NSWorkspace.shared.runningApplications.first {
+            $0.bundleIdentifier == bundleId && $0.activationPolicy == .regular
+        }
+    }
+
+    static func normalize(_ s: String) -> String {
+        s.lowercased().replacingOccurrences(of: "\\s+", with: " ", options: .regularExpression)
+    }
+
+    /// 任务级跳转。返回（是否按到了任务行, 诊断日志）。
+    static func jump(taskTitle: String, workspacePath: String, bundleId: String) -> (pressed: Bool, log: [String]) {
+        var log: [String] = []
+        // 无授权时 AX 调用只会静默失败，直接快退回调用方的 workspace 级跳转（别空转 2.4s 轮询）
+        guard ZCodeActivator.trusted() else { log.append("无辅助功能授权"); return (false, log) }
+        let needle = normalize(taskTitle)
+        guard needle.count >= 4 else { log.append("标题过短，退回 workspace 级"); return (false, log) }
+        guard let app = runningZCode(bundleId: bundleId) else { log.append("ZCode 未运行"); return (false, log) }
+        let appEl = AXUIElementCreateApplication(app.processIdentifier)
+        AXUIElementSetAttributeValue(appEl, "AXEnhancedUserInterface" as CFString, kCFBooleanTrue)
+        AXUIElementSetAttributeValue(appEl, "AXManualAccessibility" as CFString, kCFBooleanTrue)
+        // Chromium 收到标志后异步建 web AX 树（首次开启可达数秒），轮询直到命中或超时；
+        // 总时长卡在 ~2.5s——最坏情况（任务的工作区没开在任何窗口）宁可快退回 workspace 级
+        let wsBase = workspacePath.isEmpty ? "" : normalize((workspacePath as NSString).lastPathComponent)
+        let deadline = Date().addingTimeInterval(2.5)
+        for round in 0..<6 {
+            if Date() > deadline { break }
+            var hits = findTaskRows(appEl: appEl, needle: needle)
+            if hits.isEmpty, needle.count > 20 {   // 行文本可能被截断显示，退前缀匹配
+                hits = findTaskRows(appEl: appEl, needle: String(needle.prefix(20)))
+            }
+            if !hits.isEmpty {
+                // 优先任务所在工作区的窗口（窗口标题≈工作区名），同窗取最靠左（侧边栏在左）
+                let best = hits.min { h1, h2 in
+                    let s1 = windowScore(h1.window, wsBase: wsBase), s2 = windowScore(h2.window, wsBase: wsBase)
+                    return s1 != s2 ? s1 < s2 : h1.pos.x < h2.pos.x
+                }!
+                raiseWindow(appEl: appEl, window: best.window)
+                let err = AXUIElementPerformAction(best.el, kAXPressAction as CFString)
+                log.append("round\(round) press[\(best.role)]@\(Int(best.pos.x)),\(Int(best.pos.y)) err=\(err.rawValue) text=\(best.text.prefix(40))")
+                return (err == .success, log)
+            }
+            if round == 0 { log.append("windows=\(windowCount(appEl)) 首轮未命中，等 web AX 树") }
+            Thread.sleep(forTimeInterval: 0.3)
+        }
+        log.append("超时未命中: \(String(needle.prefix(40)))")
+        return (false, log)
+    }
+
+    /// AX 树概览（--ax-probe 诊断用）：每窗口标题 + 有文本的节点（role/坐标/可按性/文本）
+    static func overview(bundleId: String) -> [String] {
+        guard let app = runningZCode(bundleId: bundleId) else { return ["ZCode 未运行"] }
+        let appEl = AXUIElementCreateApplication(app.processIdentifier)
+        AXUIElementSetAttributeValue(appEl, "AXEnhancedUserInterface" as CFString, kCFBooleanTrue)
+        AXUIElementSetAttributeValue(appEl, "AXManualAccessibility" as CFString, kCFBooleanTrue)
+        Thread.sleep(forTimeInterval: 0.5)
+        var wins: CFTypeRef?
+        guard AXUIElementCopyAttributeValue(appEl, kAXWindowsAttribute as CFString, &wins) == .success,
+              let ws = wins as? [AXUIElement] else { return ["取不到窗口属性（无辅助功能授权？）"] }
+        var out = ["windows=\(ws.count)"]
+        for (i, w) in ws.enumerated() {
+            var visited = 0
+            var lines: [String] = []
+            dumpTree(el: w, depth: 0, out: &lines, visited: &visited)
+            out.append("== window[\(i)] title=\(copyStr(w, kAXTitleAttribute) ?? "?") nodes=\(visited) textNodes=\(lines.count)")
+            out += lines.prefix(400)
+        }
+        return out
+    }
+
+    // MARK: 私有
+
+    private static func windowScore(_ window: AXUIElement, wsBase: String) -> Int {
+        guard !wsBase.isEmpty, let t = copyStr(window, kAXTitleAttribute) else { return 1 }
+        return normalize(t).contains(wsBase) ? 0 : 1
+    }
+
+    private static func windowCount(_ appEl: AXUIElement) -> Int {
+        var v: CFTypeRef?
+        return AXUIElementCopyAttributeValue(appEl, kAXWindowsAttribute as CFString, &v) == .success
+            ? (v as? [AXUIElement])?.count ?? 0 : 0
+    }
+
+    private static func findTaskRows(appEl: AXUIElement, needle: String) -> [Hit] {
+        var wins: CFTypeRef?
+        guard AXUIElementCopyAttributeValue(appEl, kAXWindowsAttribute as CFString, &wins) == .success,
+              let ws = wins as? [AXUIElement] else { return [] }
+        var hits: [Hit] = []
+        for w in ws {
+            var visited = 0
+            walk(el: w, chain: [], window: w, needle: needle, hits: &hits, visited: &visited)
+        }
+        return hits
+    }
+
+    private static func walk(el: AXUIElement, chain: [AXUIElement], window: AXUIElement,
+                             needle: String, hits: inout [Hit], visited: inout Int) {
+        guard visited < 4000, chain.count < 24 else { return }
+        visited += 1
+        let text = [copyStr(el, kAXValueAttribute), copyStr(el, kAXTitleAttribute),
+                    copyStr(el, kAXDescriptionAttribute)].compactMap { $0 }.joined(separator: " ")
+        if normalize(text).contains(needle) {
+            if let hit = pressable(from: el, chain: chain, window: window) { hits.append(hit) }
+            return   // 行内子节点只会重复命中，剪掉
+        }
+        var kids: CFTypeRef?
+        guard AXUIElementCopyAttributeValue(el, kAXChildrenAttribute as CFString, &kids) == .success,
+              let ks = kids as? [AXUIElement] else { return }
+        for k in ks {
+            walk(el: k, chain: chain + [el], window: window, needle: needle, hits: &hits, visited: &visited)
+        }
+    }
+
+    /// SDK Swift 层没暴露 AXUIElementIsActionSupported，改列 AXActions 判断
+    private static func supportsPress(_ el: AXUIElement) -> Bool {
+        var v: CFTypeRef?
+        guard AXUIElementCopyAttributeValue(el, "AXActions" as CFString, &v) == .success,
+              let actions = v as? [String] else { return false }
+        return actions.contains("AXPress")
+    }
+
+    /// 命中文本 → 自身沿祖先链向上找最近支持 AXPress 的元素（行容器或行内可点区）
+    private static func pressable(from el: AXUIElement, chain: [AXUIElement], window: AXUIElement) -> Hit? {
+        for candidate in [el] + chain.reversed() {
+            guard supportsPress(candidate) else { continue }
+            var p = CGPoint.zero
+            guard let v = attr(candidate, kAXPositionAttribute),
+                  AXValueGetValue(v as! AXValue, .cgPoint, &p) else { continue }
+            let role = copyStr(candidate, kAXRoleAttribute) ?? "?"
+            let text = copyStr(candidate, kAXValueAttribute) ?? copyStr(candidate, kAXTitleAttribute) ?? ""
+            return Hit(el: candidate, window: window, role: role, text: String(text.prefix(80)), pos: p)
+        }
+        return nil
+    }
+
+    private static func attr(_ el: AXUIElement, _ name: String) -> CFTypeRef? {
+        var v: CFTypeRef?
+        AXUIElementCopyAttributeValue(el, name as CFString, &v)
+        return v
+    }
+
+    private static func copyStr(_ el: AXUIElement, _ name: String) -> String? {
+        attr(el, name) as? String
+    }
+
+    /// 诊断 dump：有文本的节点记一行（role @x,y press? text），供 --ax-probe 概览
+    private static func dumpTree(el: AXUIElement, depth: Int, out: inout [String], visited: inout Int) {
+        guard visited < 4000, depth < 20 else { return }
+        visited += 1
+        let text = [copyStr(el, kAXValueAttribute), copyStr(el, kAXTitleAttribute),
+                    copyStr(el, kAXDescriptionAttribute)].compactMap { $0 }.joined(separator: " ")
+        if !text.trimmingCharacters(in: .whitespaces).isEmpty {
+            var p = CGPoint.zero
+            if let v = attr(el, kAXPositionAttribute) { AXValueGetValue(v as! AXValue, .cgPoint, &p) }
+            let press = supportsPress(el) ? "Y" : "n"
+            let role = copyStr(el, kAXRoleAttribute) ?? "?"
+            out.append("\(role) @\(Int(p.x)),\(Int(p.y)) press=\(press) | \(text.prefix(100))")
+        }
+        var kids: CFTypeRef?
+        guard AXUIElementCopyAttributeValue(el, kAXChildrenAttribute as CFString, &kids) == .success,
+              let ks = kids as? [AXUIElement] else { return }
+        for k in ks {
+            dumpTree(el: k, depth: depth + 1, out: &out, visited: &visited)
+        }
+    }
+
+    private static func raiseWindow(appEl: AXUIElement, window: AXUIElement) {
+        AXUIElementSetAttributeValue(appEl, kAXFrontmostAttribute as CFString, kCFBooleanTrue)
+        AXUIElementSetAttributeValue(window, "AXMinimized" as CFString, kCFBooleanFalse)
+        AXUIElementSetAttributeValue(window, kAXMainAttribute as CFString, kCFBooleanTrue)
+        AXUIElementPerformAction(window, kAXRaiseAction as CFString)
+    }
+}
+
+
 // MARK: - App delegate
 
 final class AppDelegate: NSObject, NSApplicationDelegate {
@@ -2621,8 +2826,23 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         if ZCodeActivator.trusted() {
             ZCodeActivator.raise(bundleId: config.zcodeAppBundleId)
         } else {
-            ZCodeActivator.trusted(prompt: true)   // 引导用户在系统设置里授权（一次性）
+            // LSUIElement app 的系统授权弹窗常被吞（实测 3.14.3 环境 6 分钟无弹窗），
+            // prompt 之外同步把用户带到「系统设置→辅助功能」面板手动加一次（永久生效）
+            ZCodeActivator.trusted(prompt: true)
+            guideAxGrant()
             openZCodeApp()
+        }
+    }
+
+    /// 引导辅助功能授权：7 天最多自动打开一次系统设置面板，别每次点击都打扰
+    private func guideAxGrant() {
+        let ts = now()
+        guard ts - state.lastAxGuideAt > 7 * 86400 else { return }
+        state.lastAxGuideAt = ts
+        scheduleStateSave()
+        NSLog("[zcode-pet] 无辅助功能授权 → 打开系统设置引导（任务级跳转/唤起都需要）")
+        if let url = URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility") {
+            NSWorkspace.shared.open(url)
         }
     }
 
@@ -2780,9 +3000,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     @objc private func openTaskResult(_ sender: NSMenuItem) {
-        // 菜单与清单同语义：直达 ZCode 对应工作区
+        // 菜单与清单同语义：任务级直达 ZCode 对应任务行
         guard let id = sender.representedObject as? String else { return }
-        jumpToZCode(workspacePath: rowsById[id]?.workspacePath)
+        jumpTask(id: id)
     }
 
     // MARK: 宠物点击 → 任务清单 popover
@@ -2799,14 +3019,21 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     @objc private func taskRowPicked(_ sender: NSButton) {
         guard let key = sender.identifier?.rawValue,
               let sep = key.firstIndex(of: "|") else { return }
-        let prefix = String(key[..<sep])
         let id = String(key[key.index(after: sep)...])
         TaskListPopover.shared.close()
-        // 清单点击=直达 ZCode（用户 v0.6.1）：执行中跳该工作区；未读也跳
-        let ws = prefix == "run"
-            ? lastRunning.first(where: { $0.id == id })?.ws
-            : lastUnread.first(where: { $0.id == id })?.workspacePath
-        jumpToZCode(workspacePath: ws)
+        // 清单点击=直达 ZCode 任务行（用户 v0.6.1）
+        jumpTask(id: id)
+    }
+
+    /// 任务级跳转（fixes #5）：优先 AX 按任务行——窗口和任务都精确，等价 ZCode 原生推送
+    /// 点击；AX 无授权/超时未命中再退回 --open-workspace 的 workspace 级跳转。
+    private func jumpTask(id: String) {
+        let row = rowsById[id]
+        let (ok, log) = ZCodeTaskJumper.jump(taskTitle: row?.title ?? "",
+                                             workspacePath: row?.workspacePath ?? "",
+                                             bundleId: config.zcodeAppBundleId)
+        NSLog("[zcode-pet] task jump ax=\(ok) id=\(id.prefix(12)) \(log.joined(separator: " | "))")
+        if !ok { jumpToZCode(workspacePath: row?.workspacePath) }
     }
 
     @objc private func quit() {
@@ -2866,6 +3093,28 @@ final class JumpTestDelegate: NSObject, NSApplicationDelegate {
     }
 }
 
+// MARK: - --ax-probe（任务级跳转 AX 链路探测：真机取证用）
+
+/// 辅助功能授权按「来源 app」记账：终端直接 exec 出来的进程算终端的，探不到东西。
+/// 必须 open ~/.zcode-pet/zcode-pet.app --args --ax-probe ... 以 app 身份起（先
+/// launchctl bootout 停掉常驻实例），输出落 ~/.zcode-pet/ax-probe.log：
+///   · 带标题子串 = 跑一次真实任务跳转并给诊断日志；
+///   · 不带参数   = 概览 dump（窗口标题 + 有文本节点的 role/坐标/可按性/文本）。
+func runAxProbe(needle: String?) -> Int32 {
+    var out = ["== ax-probe \(needle ?? "overview") trusted=\(ZCodeActivator.trusted())"]
+    if let needle {
+        let r = ZCodeTaskJumper.jump(taskTitle: needle, workspacePath: "", bundleId: "dev.zcode.app")
+        out.append("pressed=\(r.pressed)")
+        out += r.log.map { "  " + $0 }
+    } else {
+        out += ZCodeTaskJumper.overview(bundleId: "dev.zcode.app")
+    }
+    let text = out.joined(separator: "\n")
+    print(text)
+    try? text.data(using: .utf8)?.write(to: URL(fileURLWithPath: PetConfig.dataDir + "/ax-probe.log"))
+    return 0
+}
+
 // MARK: - main
 
 if CommandLine.arguments.contains("--jump-test") {
@@ -2918,6 +3167,12 @@ if let i = CommandLine.arguments.firstIndex(of: "--ble-scan") {
         secs = v
     }
     exit(runBleScan(seconds: secs))
+}
+
+// --ax-probe [标题子串]：ZCode AX 树探测/任务级跳转自检（runAxProbe 注释里有用法）
+if let i = CommandLine.arguments.firstIndex(of: "--ax-probe") {
+    let next = i + 1 < CommandLine.arguments.count ? CommandLine.arguments[i + 1] : nil
+    exit(runAxProbe(needle: (next?.hasPrefix("-") ?? true) ? nil : next))
 }
 
 let app = NSApplication.shared
