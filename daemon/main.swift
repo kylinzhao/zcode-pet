@@ -1132,14 +1132,17 @@ enum PetArt {
 //   u16[32] 调色板 RGB565（index0=透明占位，index31=bgRGB565 压平底色）
 //   每帧：u32 payloadLen + 掩码 RLE（u8：bit7=不透明值，bit6..0=游程-1，覆盖 W×H 全部像素）
 //         + 不透明像素 8bpp 索引流（行优先自顶向下，每像素 1 字节，取值 1..31）
-//   全分辨率 236×152 直出（设备端 1:1 blit，无上采样）；烘焙量化带 4×4 Bayer 有序抖动，
+//   全分辨率 236×196 直出（设备端 1:1 blit，无上采样），导出带 zoom×1.25 居中变焦；烘焙量化带 4×4 Bayer 有序抖动，
 //   让 32 色板上的渐变/抗锯齿边空间混色。
 //   半透明像素按 alpha 压平到 bgRGB565（#1A1A1A）后量化——设备宠物页底色必须同色。
 
 enum Esp32Exporter {
     static let width = 236
-    static let height = 152
+    static let height = 196
     static let fps = 8
+    /// 画面变焦：把矢量画布按此倍率放大后居中裁进取景框（>1 = 宠物更大、边缘少量裁切）。
+    /// 1.25 时球体约占屏宽 9 成；彩带/影子最外缘会被裁，属设计内取舍。
+    static let zoom: CGFloat = 1.25
     /// 设备端宠物画布底色（协议常量 #1A1A1A → RGB565），与桌面宠物面板深色卡同族
     static let bgRGB565: UInt16 = 0x18C3
     /// 浮动烘焙的像素上限。全分辨率后同一物理偏移的像素数是半分辨率时代（±4px）的 2 倍：
@@ -1392,8 +1395,12 @@ enum Esp32Exporter {
         let rep = makeRep(pixelsWide: width, pixelsHigh: height)
         NSGraphicsContext.saveGraphicsState()
         NSGraphicsContext.current = NSGraphicsContext(bitmapImageRep: rep)
+        // zoom>1：取景框放大后居中——画布超出位图的部分自然裁掉
+        let zw = CGFloat(width) * zoom, zh = CGFloat(height) * zoom
         PetArt.render(art: skin.art!, mode: clip.mode,
-                      in: NSRect(x: 0, y: dyPx / scale, width: CGFloat(width), height: CGFloat(height)))
+                      in: NSRect(x: (CGFloat(width) - zw) / 2,
+                                 y: dyPx / scale + (CGFloat(height) - zh) / 2,
+                                 width: zw, height: zh))
         NSGraphicsContext.restoreGraphicsState()
         return reader(rep, probe: probe)
     }
