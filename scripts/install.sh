@@ -12,7 +12,7 @@ PLIST="$HOME/Library/LaunchAgents/dev.zcode.pet.plist"
 
 echo "[1/6] 编译守护进程到 .app bundle..."
 mkdir -p "$APP_BUNDLE/Contents/MacOS"
-swiftc -O "$ROOT/daemon/main.swift" "$ROOT/daemon/DeviceBridge.swift" -o "$EXE"
+swiftc -O "$ROOT/daemon/main.swift" "$ROOT/daemon/DeviceBridge.swift" -lz -o "$EXE"
 
 cat > "$APP_BUNDLE/Contents/Info.plist" <<'EOF'
 <?xml version="1.0" encoding="UTF-8"?>

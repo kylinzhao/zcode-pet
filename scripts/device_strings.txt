@@ -56,3 +56,7 @@ DETAIL_HINT = OK已读 长按继续 上返回
 GO_SENT = 已在Mac打开任务
 READ_OK = 已读
 UNREAD_MARK = ●
+SKIN_FMT = 皮肤 %s
+SKIN_0 = 球球
+SKIN_1 = 幽幽
+ABOUT_HINT2 = 下键换皮肤 OK 重连蓝牙

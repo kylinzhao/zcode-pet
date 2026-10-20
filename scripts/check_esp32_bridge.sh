@@ -25,7 +25,7 @@ TMP="$(mktemp -d)"
 trap 'rm -rf "$TMP"' EXIT
 
 echo "== [1/4] swiftc 编译 =="
-swiftc -O "$ROOT/daemon/main.swift" "$ROOT/daemon/DeviceBridge.swift" -o "$TMP/zcp-check"
+swiftc -O "$ROOT/daemon/main.swift" "$ROOT/daemon/DeviceBridge.swift" -lz -o "$TMP/zcp-check"
 echo "编译 OK → $TMP/zcp-check"
 
 echo "== [2/4] --bridge-selftest =="

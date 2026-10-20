@@ -74,6 +74,7 @@
 // 构建：bash scripts/install.sh（编译进 .app bundle + ad-hoc 签名）；自检：--test。
 
 import AppKit
+import Compression
 import SQLite3
 
 // MARK: - Config
@@ -1127,14 +1128,21 @@ enum PetArt {
 //   idle 呼吸 1 周期/T）；眨眼/呵欠按时刻表（ballHash 固定序列）选基线整体平移进循环窗内，
 //   接缝用「帧 0 vs 帧 T」回绕自检量化并打印——汗滴（working2/3）与 zZ（drowsy）周期与
 //   8fps 不可整除，存在亚像素级余差，属已知已知项，逐 clip 如实报告。
-// 【ZPF2 格式】小端（v2：全分辨率 + 32 色 + 8bpp 索引；ZPF1 已退役，解码端以 magic 拒收旧包）：
+// 【ZPF4 格式】小端（v4：帧内按 8 个行带分块 zlib——设备端解压缓冲仅需 4KB/带 + 2KB 掩码，
+//   静态开销 19KB；ZPF3 整帧缓冲 24KB 会把 BLE 挤到 3KB 堆，已退役；ZPF1/2 更早）：
 //   u8[4] magic "ZPF2" | u8 fps | u8 pad | u16 width | u16 height | u16 frameCount
 //   u16[32] 调色板 RGB565（index0=透明占位，index31=bgRGB565 压平底色）
-//   每帧：u32 payloadLen + 掩码 RLE（u8：bit7=不透明值，bit6..0=游程-1，覆盖 W×H 全部像素）
-//         + 不透明像素 8bpp 索引流（行优先自顶向下，每像素 1 字节，取值 1..31）
+//   每帧：u32 maskRawLen | u32 maskCompLen | zlib(掩码 RLE，游程覆盖全部像素)
+//         u8 bandCount(=4) | 每带：u32 rawLen | u32 compLen | zlib(该带 8bpp 索引流)
+//         带边界 = 等高行带（196/8≈25 行）；带内索引只含该带的不透明像素（行优先）
+//         掩码段 rawLen 上限 2KB / 索引带 rawLen 上限 6KB（=设备端静态缓冲；超限烘焙期硬失败）
 //   全分辨率 236×196 直出（设备端 1:1 blit，无上采样），导出带 zoom×1.25 居中变焦；烘焙量化带 4×4 Bayer 有序抖动，
 //   让 32 色板上的渐变/抗锯齿边空间混色。
 //   半透明像素按 alpha 压平到 bgRGB565（#1A1A1A）后量化——设备宠物页底色必须同色。
+
+@_silgen_name("compress2")
+private func zcp_compress2(_ dst: UnsafeMutablePointer<UInt8>, _ dstLen: UnsafeMutablePointer<UInt64>,
+                           _ src: UnsafePointer<UInt8>, _ srcLen: UInt64, _ level: Int32) -> Int32
 
 enum Esp32Exporter {
     static let width = 236
@@ -1187,6 +1195,30 @@ enum Esp32Exporter {
         (0x1A, 0x1A, 0x1A), // 31 设备底色（压平目标 = bgRGB565）
     ]
 
+    /// 设备端解压缓冲上限（字节）——zcp_zpf.h 的 ZCP_ZPF_MAX_MASK / MAX_BAND_RAW 必须同值
+    static let maxMaskRaw = 2 * 1024
+    static let maxBandRaw = 4 * 1024
+    static let bandCount = 8
+
+    /// 系统 libz 的 compress2（标准 zlib 流）。曾用 Apple Compression 的
+    /// COMPRESSION_ZLIB + 手工 zlib 头/adler 尾——主机 zlib 可解但 ESP32-C3 ROM tinfl
+    /// 全帧解码失败（2026-10-20），换正统 compress2 一劳永逸。
+    static func zlibWrap(_ payload: [UInt8]) -> [UInt8]? {
+        guard payload.count <= max(maxMaskRaw, maxBandRaw) else {
+            print("✗ 块载荷 \(payload.count)B 超解压缓冲上限")
+            return nil
+        }
+        var dstLen = UInt64(payload.count + 1024)
+        var dst = [UInt8](repeating: 0, count: Int(dstLen))
+        let rc = payload.withUnsafeBufferPointer { src in
+            dst.withUnsafeMutableBufferPointer { d in
+                zcp_compress2(d.baseAddress!, &dstLen, src.baseAddress!, UInt64(payload.count), 6)
+            }
+        }
+        guard rc == 0 else { return nil }
+        return Array(dst[0..<Int(dstLen)])
+    }
+
     /// 4×4 Bayer 有序抖动矩阵（0..15，使用时归一到 ±0.5）
     static let bayer4: [[Int]] = [
         [ 0,  8,  2, 10],
@@ -1196,6 +1228,8 @@ enum Esp32Exporter {
     ]
     /// 抖动强度（RGB 0..255 尺度）：约为相邻渐变档色差的一半，让边界两侧空间混色
     static let ditherStrength: CGFloat = 14
+    /// 平涂型皮肤（ghost 等）关抖动：色带本就平、抖动只增大熵（真机 ghost 载荷 -22% 实测依据）
+    static let noDitherSkins: Set<String> = ["ghost"]
 
     struct Clip {
         let name: String
@@ -1425,6 +1459,7 @@ enum Esp32Exporter {
 
     /// 帧编码：返回 RLE 掩码 + 8bpp 索引流 + flat[y*width+x]（0=透明，否则调色板 1..31，
     /// 供回绕自检逐像素比对）。量化前叠加 4×4 Bayer 有序抖动（按像素位置取阈值）。
+    private static var ditherOn = true
     private static func encodeFrame(_ px: PixelReader) -> (mask: [UInt8], idx: [UInt8], flat: [UInt8]) {
         var mask: [UInt8] = []
         var curValue: UInt8 = 0
@@ -1440,7 +1475,7 @@ enum Esp32Exporter {
                 var value: UInt8 = 0
                 if a >= 10 {
                     let alpha = CGFloat(a) / 255
-                    let offset = (CGFloat(bayer4[y % 4][x % 4]) / 16 - 0.5) * ditherStrength
+                    let offset = ditherOn ? (CGFloat(bayer4[y % 4][x % 4]) / 16 - 0.5) * ditherStrength : 0
                     let rr = CGFloat(r) * alpha + CGFloat(palette[31].0) * (1 - alpha) + offset
                     let gg = CGFloat(g) * alpha + CGFloat(palette[31].1) * (1 - alpha) + offset
                     let bb = CGFloat(b) * alpha + CGFloat(palette[31].2) * (1 - alpha) + offset
@@ -1466,8 +1501,8 @@ enum Esp32Exporter {
     // MARK: 导出入口
 
     @discardableResult
-    static func exportAll(to dir: String, skins: [String] = ["ball"]) -> Int32 {
-        print("export-esp32 → \(dir) (fps \(fps), \(width)×\(height), ZPF2 全分辨率+32色+抖动)")
+    static func exportAll(to dir: String, skins: [String] = ["ball", "ghost"]) -> Int32 {
+        print("export-esp32 → \(dir) (fps \(fps), \(width)×\(height), ZPF3 压缩+32色+抖动)")
         guard let probe = probeLayout() else {
             print("✗ 位图布局探针失败：AppKit 位图内存布局不符合任一已知排列")
             return 1
@@ -1487,7 +1522,8 @@ enum Esp32Exporter {
                 failures += 1
                 continue
             }
-            print("  skin \(skinId):")
+            ditherOn = !noDitherSkins.contains(skinId)
+            print("  skin \(skinId)\(ditherOn ? "" : "（无抖动）"):")
             print("  clip        frames  bytes    baseline  wrapDiff  bobCap")
             for clip in clips() {
                 let T = CGFloat(clip.frames) / CGFloat(fps)
@@ -1511,7 +1547,7 @@ enum Esp32Exporter {
                 var data = Data()
                 func u16le(_ v: UInt16) { withUnsafeBytes(of: v.littleEndian) { data.append(contentsOf: $0) } }
                 func u32le(_ v: UInt32) { withUnsafeBytes(of: v.littleEndian) { data.append(contentsOf: $0) } }
-                data.append(contentsOf: "ZPF2".utf8)
+                data.append(contentsOf: "ZPF4".utf8)
                 data.append(UInt8(fps)); data.append(0)
                 u16le(UInt16(width)); u16le(UInt16(height)); u16le(UInt16(clip.frames))
                 for p in palette { u16le(rgb565(p.0, p.1, p.2)) }
@@ -1535,11 +1571,44 @@ enum Esp32Exporter {
                     precondition(runSum == width * height, "掩码游程 \(runSum) ≠ \(width * height)")
                     precondition(frame.idx.count == opaqueCount,
                                  "索引流 \(frame.idx.count)B ≠ 不透明 \(opaqueCount)px")
-                    let payload = frame.mask.count + frame.idx.count
-                    u32le(UInt32(payload))
-                    data.append(contentsOf: frame.mask)
-                    data.append(contentsOf: frame.idx)
-                    framePayload += payload + 4
+                    // 掩码块
+                    if frame.mask.count > maxMaskRaw {
+                        print("✗ clip \(clip.name) 帧 \(i) 掩码段 \(frame.mask.count)B 超上限")
+                        failures += 1
+                        continue
+                    }
+                    guard let maskComp = zlibWrap(frame.mask) else { failures += 1; continue }
+                    u32le(UInt32(frame.mask.count))
+                    u32le(UInt32(maskComp.count))
+                    data.append(contentsOf: maskComp)
+                    framePayload += maskComp.count + 9
+
+                    // 索引按行带切：第 b 带的索引 = 行 [b*h/4, (b+1)*h/4) 内不透明像素的
+                    // 索引字节（flat 顺序遍历，行落在带内且 flat>0 则计入）
+                    data.append(UInt8(bandCount))
+                    framePayload += 1
+                    let bandH = height / bandCount
+                    for b in 0..<bandCount {
+                        let y0 = b * bandH, y1 = (b == bandCount - 1) ? height : (b + 1) * bandH
+                        var bandIdx: [UInt8] = []
+                        bandIdx.reserveCapacity(maxBandRaw)
+                        for y in y0..<y1 {
+                            let rowBase = y * width
+                            for x in 0..<width where frame.flat[rowBase + x] > 0 {
+                                bandIdx.append(frame.flat[rowBase + x])
+                            }
+                        }
+                        if bandIdx.count > maxBandRaw {
+                            print("✗ clip \(clip.name) 帧 \(i) 带 \(b) 索引 \(bandIdx.count)B 超上限")
+                            failures += 1
+                            break
+                        }
+                        guard let bandComp = zlibWrap(bandIdx) else { failures += 1; break }
+                        u32le(UInt32(bandIdx.count))
+                        u32le(UInt32(bandComp.count))
+                        data.append(contentsOf: bandComp)
+                        framePayload += bandComp.count + 8
+                    }
                 }
                 let path = (dir as NSString).appendingPathComponent("\(skinId)-\(clip.name).zpf")
                 do {
@@ -2950,7 +3019,7 @@ if let i = CommandLine.arguments.firstIndex(of: "--render-art"), CommandLine.arg
 // --export-esp32 <dir> [--skins ball,cat]：烘焙设备端 .zpf 帧包（12 段锁相循环 clip，见
 // Esp32Exporter；gen_device_assets.sh 调用，产物默认落 ai-passport/main/assets/pet/）
 if let i = CommandLine.arguments.firstIndex(of: "--export-esp32"), CommandLine.arguments.count > i + 1 {
-    var skins = ["ball"]   // v1 只烘 ball（全家族约 12MB 超分区，需挑 2-3 款或改帧格式）
+    var skins = ["ball", "ghost"]   // ZPF3 压缩后单套 ~0.56MB，多皮肤进得去（见 exportAll）
     if let s = CommandLine.arguments.firstIndex(of: "--skins"), CommandLine.arguments.count > s + 1 {
         skins = CommandLine.arguments[s + 1].split(separator: ",").map(String.init)
     }
