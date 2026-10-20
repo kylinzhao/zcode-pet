@@ -62,7 +62,7 @@
 // v1.6 ESP32 桌面桥接：抽出 PetDisplayState 快照（mode/tier/run/unread/mid/文案）作为
 //     宠物文案与设备的单一语义源，把快照推给 FoloToy AI Passport 设备镜像播放；
 //     --export-esp32 用 PetArt 引擎离线烘焙 12 段锁相循环 clip 成 .zpf 帧包
-//     （ZPF1，16 色 RGB565 + 1bpp 掩码 RLE + 4bpp 索引）。校验：scripts/check_esp32_bridge.sh。
+//     （ZPF2，236×152 全分辨率、32 色 RGB565、1bpp 掩码 RLE + 8bpp 索引 + Bayer 抖动）。校验：scripts/check_esp32_bridge.sh。
 // v1.7 桥接传输 BLE 化（v1.6 的 UDP/8765 整体退役）：daemon/DeviceBridge.swift 用
 //     CoreBluetooth 中心角色扫描/连接设备（NimBLE 外设常驻广播，服务
 //     5A1C0001-7BCD-4E0F-9A2B-3D5E6F8091A2），status ≤512B 走 write-with-response
@@ -1127,26 +1127,28 @@ enum PetArt {
 //   idle 呼吸 1 周期/T）；眨眼/呵欠按时刻表（ballHash 固定序列）选基线整体平移进循环窗内，
 //   接缝用「帧 0 vs 帧 T」回绕自检量化并打印——汗滴（working2/3）与 zZ（drowsy）周期与
 //   8fps 不可整除，存在亚像素级余差，属已知已知项，逐 clip 如实报告。
-// 【ZPF1 格式】小端：
-//   u8[4] magic "ZPF1" | u8 fps | u8 pad | u16 width | u16 height | u16 frameCount
-//   u16[16] 调色板 RGB565（index0=透明占位，index15=bgRGB565 压平底色）
+// 【ZPF2 格式】小端（v2：全分辨率 + 32 色 + 8bpp 索引；ZPF1 已退役，解码端以 magic 拒收旧包）：
+//   u8[4] magic "ZPF2" | u8 fps | u8 pad | u16 width | u16 height | u16 frameCount
+//   u16[32] 调色板 RGB565（index0=透明占位，index31=bgRGB565 压平底色）
 //   每帧：u32 payloadLen + 掩码 RLE（u8：bit7=不透明值，bit6..0=游程-1，覆盖 W×H 全部像素）
-//         + 不透明像素 4bpp 索引流（行优先自顶向下，高 nibble 在前）
-//   半分辨率 118×76 + 设备端 2× 最近邻上采样到 236×152（LVGL draw-event 流式 blit）。
+//         + 不透明像素 8bpp 索引流（行优先自顶向下，每像素 1 字节，取值 1..31）
+//   全分辨率 236×152 直出（设备端 1:1 blit，无上采样）；烘焙量化带 4×4 Bayer 有序抖动，
+//   让 32 色板上的渐变/抗锯齿边空间混色。
 //   半透明像素按 alpha 压平到 bgRGB565（#1A1A1A）后量化——设备宠物页底色必须同色。
 
 enum Esp32Exporter {
-    static let width = 118
-    static let height = 76
+    static let width = 236
+    static let height = 152
     static let fps = 8
     /// 设备端宠物画布底色（协议常量 #1A1A1A → RGB565），与桌面宠物面板深色卡同族
     static let bgRGB565: UInt16 = 0x18C3
-    /// 浮动烘焙的像素上限（位图 76px 高、画布近乎满幅，桌面 ±12pt 的庆祝跳动放不下：
-    /// 超限封顶并告警，见 clip 汇总表的 bobCap 列）
-    static let maxBobPx: CGFloat = 4
+    /// 浮动烘焙的像素上限。全分辨率后同一物理偏移的像素数是半分辨率时代（±4px）的 2 倍：
+    /// 超限封顶并告警，见 clip 汇总表的 bobCap 列
+    static let maxBobPx: CGFloat = 8
 
-    /// 固定 16 色调色板（RGB888，写入转 RGB565）：皮肤色系固定，免量化漂移。
-    /// 取自 PetArt 常量（体色/三情绪/内耳粉/腮红/海苔/彩带绿/汗滴/心心/体色亮暗档/白/墨/bg）
+    /// 固定 32 色调色板（RGB888，写入转 RGB565）：皮肤色系固定，免量化漂移。
+    /// 0-15 沿用 ZPF1 时代的设计常量；16-31 为全分辨率烘焙新增的渐变细分级
+    /// （体色亮暗极档、各情绪色亮暗、体色→底色的 AA 灰阶）——32 色配 8bpp 索引刚好。
     static let palette: [(UInt8, UInt8, UInt8)] = [
         (0x00, 0x00, 0x00), // 0  透明占位（不出现在索引流）
         (0xF3, 0xF0, 0xEA), // 1  idle 体色
@@ -1164,7 +1166,33 @@ enum Esp32Exporter {
         (0xBF, 0xE3, 0xF7), // 13 汗滴蓝
         (0xFA, 0x99, 0xB3), // 14 心心粉
         (0x1A, 0x1A, 0x1A), // 15 设备底色（压平目标 = bgRGB565）
+        (0xFB, 0xF9, 0xF5), // 16 体色更亮（高光芯，+0.35）
+        (0xB8, 0xB5, 0xB0), // 17 体色更深（渐变 -0.25）
+        (0x92, 0xBF, 0xDB), // 18 汗滴蓝暗档
+        (0xA6, 0xC6, 0xF5), // 19 working 蓝亮档
+        (0x5B, 0x7F, 0xBE), // 20 working 蓝暗档
+        (0xFA, 0xCD, 0x7A), // 21 celebrate 金亮档
+        (0xC9, 0x8D, 0x2E), // 22 celebrate 金暗档
+        (0xFB, 0xA3, 0x96), // 23 error 珊瑚亮档
+        (0xC4, 0x54, 0x45), // 24 error 珊瑚暗档
+        (0xFC, 0xC1, 0xCE), // 25 心心/内耳粉亮档
+        (0xE1, 0x7F, 0x93), // 26 腮红深档
+        (0x5F, 0x93, 0x77), // 27 彩带绿暗档
+        (0xC8, 0xC5, 0xC0), // 28 体色→底色 AA 灰 1（浅）
+        (0x8F, 0x8C, 0x87), // 29 体色→底色 AA 灰 2（中）
+        (0x51, 0x4F, 0x4B), // 30 体色→底色 AA 灰 3（深）
+        (0x1A, 0x1A, 0x1A), // 31 设备底色（压平目标 = bgRGB565）
     ]
+
+    /// 4×4 Bayer 有序抖动矩阵（0..15，使用时归一到 ±0.5）
+    static let bayer4: [[Int]] = [
+        [ 0,  8,  2, 10],
+        [12,  4, 14,  6],
+        [ 3, 11,  1,  9],
+        [15,  7, 13,  5],
+    ]
+    /// 抖动强度（RGB 0..255 尺度）：约为相邻渐变档色差的一半，让边界两侧空间混色
+    static let ditherStrength: CGFloat = 14
 
     struct Clip {
         let name: String
@@ -1388,8 +1416,8 @@ enum Esp32Exporter {
         return best
     }
 
-    /// 帧编码：返回 RLE 掩码 + 4bpp 索引流 + flat[y*width+x]（0=透明，否则调色板 1..15，
-    /// 供回绕自检逐像素比对）
+    /// 帧编码：返回 RLE 掩码 + 8bpp 索引流 + flat[y*width+x]（0=透明，否则调色板 1..31，
+    /// 供回绕自检逐像素比对）。量化前叠加 4×4 Bayer 有序抖动（按像素位置取阈值）。
     private static func encodeFrame(_ px: PixelReader) -> (mask: [UInt8], idx: [UInt8], flat: [UInt8]) {
         var mask: [UInt8] = []
         var curValue: UInt8 = 0
@@ -1398,7 +1426,6 @@ enum Esp32Exporter {
             if curRun > 0 { mask.append(curValue << 7 | (curRun - 1)); curRun = 0 }
         }
         var idx: [UInt8] = []
-        var loNibble = false
         var flat = [UInt8](repeating: 0, count: width * height)
         for y in 0..<height {          // 行优先自顶向下（设备 blit 顺序）
             for x in 0..<width {
@@ -1406,14 +1433,14 @@ enum Esp32Exporter {
                 var value: UInt8 = 0
                 if a >= 10 {
                     let alpha = CGFloat(a) / 255
-                    let rr = CGFloat(r) * alpha + CGFloat(palette[15].0) * (1 - alpha)
-                    let gg = CGFloat(g) * alpha + CGFloat(palette[15].1) * (1 - alpha)
-                    let bb = CGFloat(b) * alpha + CGFloat(palette[15].2) * (1 - alpha)
+                    let offset = (CGFloat(bayer4[y % 4][x % 4]) / 16 - 0.5) * ditherStrength
+                    let rr = CGFloat(r) * alpha + CGFloat(palette[31].0) * (1 - alpha) + offset
+                    let gg = CGFloat(g) * alpha + CGFloat(palette[31].1) * (1 - alpha) + offset
+                    let bb = CGFloat(b) * alpha + CGFloat(palette[31].2) * (1 - alpha) + offset
                     let q = nearestPalette(rr, gg, bb)
-                    precondition(q >= 1 && q < 16, "调色板索引越界 \(q)")
+                    precondition(q >= 1 && q < 32, "调色板索引越界 \(q)")
                     flat[y * width + x] = q
-                    if loNibble { idx[idx.count - 1] |= q } else { idx.append(q << 4) }
-                    loNibble.toggle()
+                    idx.append(q)
                     value = 1
                 }
                 if value == curValue, curRun < 127 {
@@ -1433,7 +1460,7 @@ enum Esp32Exporter {
 
     @discardableResult
     static func exportAll(to dir: String, skins: [String] = ["ball"]) -> Int32 {
-        print("export-esp32 → \(dir) (fps \(fps), \(width)×\(height), ZPF1)")
+        print("export-esp32 → \(dir) (fps \(fps), \(width)×\(height), ZPF2 全分辨率+32色+抖动)")
         guard let probe = probeLayout() else {
             print("✗ 位图布局探针失败：AppKit 位图内存布局不符合任一已知排列")
             return 1
@@ -1477,7 +1504,7 @@ enum Esp32Exporter {
                 var data = Data()
                 func u16le(_ v: UInt16) { withUnsafeBytes(of: v.littleEndian) { data.append(contentsOf: $0) } }
                 func u32le(_ v: UInt32) { withUnsafeBytes(of: v.littleEndian) { data.append(contentsOf: $0) } }
-                data.append(contentsOf: "ZPF1".utf8)
+                data.append(contentsOf: "ZPF2".utf8)
                 data.append(UInt8(fps)); data.append(0)
                 u16le(UInt16(width)); u16le(UInt16(height)); u16le(UInt16(clip.frames))
                 for p in palette { u16le(rgb565(p.0, p.1, p.2)) }
@@ -1495,11 +1522,11 @@ enum Esp32Exporter {
                     if dyPx < -maxBobPx { dyPx = -maxBobPx; capped += 1 }
                     let frame = encodeFrame(renderFrame(skin: skin, clip: clip, t: t, baseline: baseline,
                                                         dyPx: dyPx, scale: scale, probe: probe))
-                    // 结构自检：掩码游程覆盖全部像素；4bpp 流与不透明像素一一对应
+                    // 结构自检：掩码游程覆盖全部像素；8bpp 流与不透明像素一一对应
                     let runSum = frame.mask.reduce(0) { $0 + Int($1 & 0x7F) + 1 }
                     let opaqueCount = frame.flat.filter { $0 > 0 }.count
                     precondition(runSum == width * height, "掩码游程 \(runSum) ≠ \(width * height)")
-                    precondition(frame.idx.count == (opaqueCount + 1) / 2,
+                    precondition(frame.idx.count == opaqueCount,
                                  "索引流 \(frame.idx.count)B ≠ 不透明 \(opaqueCount)px")
                     let payload = frame.mask.count + frame.idx.count
                     u32le(UInt32(payload))
@@ -1527,7 +1554,7 @@ enum Esp32Exporter {
             }
         }
         print("  共 \(totalFrames) 帧 / \((Double(totalBytes) / 1024 / 1024 * 100).rounded() / 100) MB")
-        print("  调色板 16 色 RGB565（index0=透明）；底色常量 bg=#1A1A1A(0x\(String(bgRGB565, radix: 16)))" +
+        print("  调色板 32 色 RGB565（index0=透明，8bpp 索引，Bayer 抖动 strength=\(Int(ditherStrength))）；底色常量 bg=#1A1A1A(0x\(String(bgRGB565, radix: 16)))" +
               "——设备宠物页底色必须同色")
         print("  形象级缺口（方案内声明）：impatient→working 帧、combo→celebrate+mid11 文案、dangle 无设备场景")
         return failures == 0 ? 0 : 1

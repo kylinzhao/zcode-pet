@@ -6,7 +6,7 @@
 # 因为 zcode-pet 文档与调用习惯是「在 zcode-pet 目录跑」）。
 #
 # 产物（全部入库 ai-passport）：
-#   main/assets/pet/*.zpf                      12 段动画帧包（--export-esp32 烘焙，ZPF1）
+#   main/assets/pet/*.zpf                      12 段动画帧包（--export-esp32 烘焙，ZPF2）
 #   main/zcp_strings.c/.h                      闭集文案表 + 设备区具名字符串
 #   assets/fonts/zcp_font_16.c                 16px 中文子集字体（lv_font_conv --no-compress）
 #   assets/fonts/zcp_font_16.codepoints.txt    码点登记（build_pet.sh 覆盖检查的基准）
