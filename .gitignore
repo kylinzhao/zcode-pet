@@ -10,3 +10,6 @@ build/
 # 内部调研文档（本地保留，不公开）
 issues/
 README-research-2026-09-21.md
+
+# worktree 工作区
+.worktrees/
