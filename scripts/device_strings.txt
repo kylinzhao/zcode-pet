@@ -42,3 +42,17 @@ ABOUT_HINT = OK 重连蓝牙 · 长按返回
 BATT_FMT = 电量 {n}%
 BLE_FAIL_FMT = 蓝牙启动失败({n})
 BLE_RESCUE = 重启蓝牙中…
+
+# v1.8 任务列表/详情（设备区）
+TOPBAR_BATT_FMT = 任务%d 未读%d %d%%
+TASKS_TITLE = 任务列表
+TASK_EMPTY = 暂无任务
+TASK_ST0 = 空闲
+TASK_ST1 = 运行中
+TASK_ST2 = 已完成
+TASK_ST3 = 出错
+LIST_HINT = 上下选择 OK详情
+DETAIL_HINT = OK已读 长按继续 上返回
+GO_SENT = 已在Mac打开任务
+READ_OK = 已读
+UNREAD_MARK = ●

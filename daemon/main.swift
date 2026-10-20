@@ -2408,11 +2408,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     // v1.6/v1.7 ESP32 桥接：设备 OK 已读水位 + BLE status 推送（nil = config.json bridge:false 关闭）
     private var bridge: DeviceBridge?
     private var ackedReadTs: Double = 0
+    private var readTaskIds: Set<String> = []        // v1.8 设备逐任务已读集合
 
     override init() {
         let cfg = PetConfig.load()
         store = TaskStore(path: cfg.dbPath)
         ackedReadTs = ReadWatermark.load()
+        readTaskIds = ReadTasks.load()
         super.init()
         AppDelegate.shared = self
     }
@@ -2446,6 +2448,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                                                 unread: self.lastUnread.count)
             }
             b.onRead = { [weak self] in self?.markDeviceRead() }
+            b.onReadTask = { [weak self] i in self?.markDeviceTaskRead(i) }
+            b.onGoTask = { [weak self] i in self?.openDeviceTask(i) }
+            b.onNeedTasks = { [weak self] in self?.deviceTaskList() }
             b.linkDidChange = { [weak self] _ in self?.refreshDeviceTooltip() }
             bridge = b
             b.start()
@@ -2665,6 +2670,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // 未读 = DB live 标记，且晚于设备 OK 已读水位（水位 0 = 从未确认，行为不变）
         let unread = byId.values
             .filter { ($0.status == "completed" || $0.status == "error") && $0.unreadAtMs > ackedReadTs }
+            .filter { !readTaskIds.contains($0.id) }
             .sorted { $0.unreadAtMs > $1.unreadAtMs }
         let running: [(title: String, id: String, ws: String)] = displayIds.map { id in
             let row = byId[id]
@@ -2677,6 +2683,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         pet.update(mode: m, skin: skin, runningCount: running.count, unreadCount: unread.count)
         // 桥接推同一快照（变化即时补发；2s 周期兜底在 bridge 自己的定时器里）
         bridge?.push(PetDisplayState.snapshot(mode: m, run: running.count, unread: unread.count))
+        if let list = deviceTaskList(from: Array(byId.values)) { bridge?.pushTasks(list) }
         refreshDeviceTooltip()
         let base = running.isEmpty ? "🐾" : "🐾 \(running.count)"
         statusItem.button?.title = unread.isEmpty ? base : "\(base) 📬\(unread.count)"
@@ -2693,6 +2700,53 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let rows = store.allTasks()
         let byId = Dictionary(uniqueKeysWithValues: rows.map { ($0.id, $0) })
         updateUI(displayIds: Set(busyIds).union(byId.filter { $0.value.status == "running" }.keys), byId: byId)
+    }
+
+    /// 设备任务列表（updated_at 倒序取 8 条）
+    private func deviceTaskList(from rows: [TaskRow]? = nil) -> [DeviceBridge.DeviceTask]? {
+        guard let store else { return nil }
+        let all = rows ?? store.allTasks()
+        let top = all.sorted { $0.updatedAtMs > $1.updatedAtMs }.prefix(8)
+        return top.map { r in
+            let st: Int
+            switch r.status {
+            case "running": st = 1
+            case "completed": st = 2
+            case "error": st = 3
+            default: st = 0
+            }
+            let unread = (r.status == "completed" || r.status == "error")
+                && r.unreadAtMs > ackedReadTs && !readTaskIds.contains(r.id)
+            return DeviceBridge.DeviceTask(id: r.id, title: r.title, status: st, unread: unread)
+        }
+    }
+
+    /// 设备详情页逐任务已读：入集合 + 持久化 + 立即刷新两端
+    private func markDeviceTaskRead(_ index: Int) {
+        guard let entry = bridge?.taskId(at: index) else {
+            NSLog("[zcode-pet] device read(i=%d) 下标无效（列表已变化），忽略", index)
+            return
+        }
+        readTaskIds.insert(entry.id)
+        ReadTasks.save(readTaskIds)
+        NSLog("[zcode-pet] device read → 任务已读 %@", String(entry.task.title.prefix(20)))
+        guard let store else { return }
+        let rows = store.allTasks()
+        let byId = Dictionary(uniqueKeysWithValues: rows.map { ($0.id, $0) })
+        updateUI(displayIds: Set(busyIds).union(byId.filter { $0.value.status == "running" }.keys), byId: byId)
+    }
+
+    /// 设备详情页「继续」：打开该任务的工作区（ZCode 前置到该任务所在 workspace）
+    private func openDeviceTask(_ index: Int) {
+        guard let entry = bridge?.taskId(at: index) else {
+            NSLog("[zcode-pet] device go(i=%d) 下标无效，忽略", index)
+            return
+        }
+        guard let store else { return }
+        let rows = store.allTasks()
+        guard let row = rows.first(where: { $0.id == entry.id }) else { return }
+        NSLog("[zcode-pet] device go → 打开工作区 %@", row.workspacePath)
+        jumpToZCode(workspacePath: row.workspacePath.isEmpty ? nil : row.workspacePath)
     }
 
     private func refreshDeviceTooltip() {

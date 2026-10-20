@@ -78,13 +78,13 @@ legacy = sorted({k for k, _, _ in device if k.startswith(('CFG_', 'WIFI_')) or k
 if legacy:
     errors.append(f"UDP/USB 配网遗留键未清理（BLE 化后应删除）: {','.join(legacy)}")
 
-# 字符白名单：ASCII 可打印 + ·×…！→ 箭头 + 全角逗号顿号句号 + CJK（与 daemon 内
+# 字符白名单：ASCII 可打印 + ·×…！→ 箭头 + 全角逗号顿号句号 + ●（未读标记）+ CJK（与 daemon 内
 # DeviceStrings.outsideCharset 同一集合）。emoji（思源黑体无字形）一律拒绝。
 def outside(s):
     bad = []
     for ch in s:
         cp = ord(ch)
-        ok = (0x20 <= cp <= 0x7e or cp in (0x00b7, 0x00d7, 0x2026, 0xff01, 0xff0c, 0x3001, 0x3002)
+        ok = (0x20 <= cp <= 0x7e or cp in (0x00b7, 0x00d7, 0x2026, 0xff01, 0xff0c, 0x3001, 0x3002, 0x25cf)
               or 0x2190 <= cp <= 0x2193 or 0x3000 <= cp <= 0x9fff)
         if not ok and ch not in bad:
             bad.append(ch)

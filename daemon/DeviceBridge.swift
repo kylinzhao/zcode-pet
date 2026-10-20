@@ -59,6 +59,23 @@ enum ReadWatermark {
     }
 }
 
+/// v1.8 设备逐任务已读：任务 id 集合（JSON 数组持久化）。未读判定 =
+/// unread_at > 水位 && id ∉ 本集合（设备详情页 OK 键写入；不碰 ZCode DB）。
+enum ReadTasks {
+    static var path: String { PetConfig.dataDir + "/read_tasks" }
+
+    static func load() -> Set<String> {
+        guard let data = try? Data(contentsOf: URL(fileURLWithPath: path)),
+              let arr = (try? JSONSerialization.jsonObject(with: data)) as? [String] else { return [] }
+        return Set(arr)
+    }
+
+    static func save(_ ids: Set<String>) {
+        guard let data = try? JSONSerialization.data(withJSONObject: Array(ids).sorted()) else { return }
+        try? data.write(to: URL(fileURLWithPath: path))
+    }
+}
+
 // MARK: - 链路状态机（纯逻辑，注入时钟，主机可测——不触碰 CoreBluetooth）
 
 /// BLE 链路五相：idle（未启动）→ scanning → connecting → online（TX 已订阅）→
@@ -149,7 +166,18 @@ final class DeviceBridge: NSObject, CBCentralManagerDelegate, CBPeripheralDelega
     static let maxStatusBytes = 512                 // RX 特征上限；发送前断言
 
     var stateProvider: (() -> PetDisplayState?)?    // 主线程取最新快照（AppDelegate 提供）
-    var onRead: (() -> Void)?                       // 设备 OK 键 → 已读确认
+    var onRead: (() -> Void)?                       // 设备 read（无 i）→ 全部已读水位
+    var onReadTask: ((Int) -> Void)?                // 设备 read{i} → 逐任务已读（items 下标）
+    var onGoTask: ((Int) -> Void)?                  // 设备 go{i} → 打开该任务工作区
+    var onNeedTasks: (() -> [DeviceTask]?)?         // 设备 gettasks → 立即取全量任务
+
+    /// 设备任务列表的 Mac 侧镜像条目（tasks 帧的源数据）
+    struct DeviceTask {
+        let id: String
+        let title: String
+        let status: Int        // 0空闲/其他 1运行 2完成 3出错
+        let unread: Bool
+    }
     var linkDidChange: ((DeviceLink.Phase) -> Void)?
 
     // internal var：selftest 直驱状态机注入事件（类属性 var 上的结构体 mutating 调用原地写回）
@@ -249,6 +277,18 @@ final class DeviceBridge: NSObject, CBCentralManagerDelegate, CBPeripheralDelega
 
     static func isHello(_ data: Data) -> Bool { message(data)?["t"] as? String == "hello" }
     static func isRead(_ data: Data) -> Bool { message(data)?["t"] as? String == "read" }
+
+    /// tasks 帧：标题截 12 字（UTF-8 最长 36B），8 条封顶，整体 <512B
+    static func tasksJSON(lv: Int, tasks: [DeviceTask]) -> Data? {
+        var items: [[String: Any]] = []
+        for t in tasks.prefix(8) {
+            let title = String(t.title.prefix(12))
+            var o: [String: Any] = ["t": title, "s": t.status]
+            if t.unread { o["u"] = 1 }
+            items.append(o)
+        }
+        return try? JSONSerialization.data(withJSONObject: ["v": protoVersion, "t": "tasks", "lv": lv, "items": items])
+    }
     static func ackSeq(_ data: Data) -> Int? {
         guard let o = message(data), o["t"] as? String == "ack" else { return nil }
         return o["seq"] as? Int
@@ -269,11 +309,50 @@ final class DeviceBridge: NSObject, CBCentralManagerDelegate, CBPeripheralDelega
             link.packet(now: now)
         case "read":
             link.packet(now: now)
-            NSLog("[zcode-pet] device bridge: 收到设备 OK 键已读确认（read）")
-            onRead?()
+            if let i = obj["i"] as? Int {
+                NSLog("[zcode-pet] device bridge: 逐任务已读 read(i=\(i), lv=\(obj["lv"] ?? -1))")
+                onReadTask?(i)
+            } else {
+                NSLog("[zcode-pet] device bridge: 收到设备 OK 键已读确认（read 全部）")
+                onRead?()
+            }
+        case "go":
+            link.packet(now: now)
+            if let i = obj["i"] as? Int {
+                NSLog("[zcode-pet] device bridge: go(i=\(i)) → 打开任务工作区")
+                onGoTask?(i)
+            }
+        case "gettasks":
+            link.packet(now: now)
+            NSLog("[zcode-pet] device bridge: 设备请求任务列表（gettasks）")
+            if let list = onNeedTasks?() { pushTasks(list, force: true) }
         default:
             break
         }
+    }
+
+    // MARK: 任务列表推送（变化即推；连接由 gettasks 拉起）
+
+    private var lastTasksSig = ""
+    private var tasksLv = 0
+    private var lastPushedTasks: [DeviceTask] = []
+
+    func pushTasks(_ tasks: [DeviceTask], force: Bool = false) {
+        let sig = tasks.map { "\($0.id)|\($0.status)|\($0.unread ? 1 : 0)|\($0.title)" }.joined(separator: ";")
+        lastPushedTasks = tasks
+        guard force || sig != lastTasksSig else { return }
+        lastTasksSig = sig
+        tasksLv += 1
+        guard link.phase == .online, let data = DeviceBridge.tasksJSON(lv: tasksLv, tasks: tasks) else { return }
+        sendRaw(data, label: "tasks lv=\(tasksLv) \(tasks.count)项")
+    }
+
+    /// read/go 的 items 下标 → 任务 id（设备回传 lv 与当前推送代次一致才有效）
+    func taskId(at index: Int) -> (id: String, task: DeviceTask)? {
+        let arr = lastPushedTasks.prefix(8)
+        guard index >= 0, index < arr.count else { return nil }
+        let t = arr[index]
+        return (t.id, t)
     }
 
     /// 状态变化入口（updateUI 每 2s 轮询都会调；变化才即时补发）
@@ -311,6 +390,17 @@ final class DeviceBridge: NSObject, CBCentralManagerDelegate, CBPeripheralDelega
         }
         // write-with-response：ATT 层逐包确认；MTU 不足时 CoreBluetooth 自动走
         // Prepare/Execute long write（NimBLE 侧自动重装，回调收到完整 buffer）
+        p.writeValue(data, for: rx, type: .withResponse)
+    }
+
+    /// 任意协议帧下发（tasks 等；与 status 同一 RX 特征、同一写法）
+    private func sendRaw(_ data: Data, label: String) {
+        guard let p = peripheral, let rx = rxChar else { return }
+        guard data.count <= Self.maxStatusBytes else {
+            NSLog("[zcode-pet] device bridge: \(label) 超 RX 上限（\(data.count)B），丢弃")
+            return
+        }
+        NSLog("[zcode-pet] device bridge: 下发 \(label)（\(data.count)B）")
         p.writeValue(data, for: rx, type: .withResponse)
     }
 
@@ -825,7 +915,7 @@ struct DeviceStrings {
         for scalar in s.unicodeScalars {
             var ok = false
             switch scalar.value {
-            case 0x20...0x7E, 0x00B7, 0x00D7, 0x2026, 0xFF01, 0x2190...0x2193, 0xFF0C, 0x3001, 0x3002, 0x3000...0x9FFF: ok = true
+            case 0x20...0x7E, 0x00B7, 0x00D7, 0x2026, 0xFF01, 0x25CF, 0x2190...0x2193, 0xFF0C, 0x3001, 0x3002, 0x3000...0x9FFF: ok = true
             default: break
             }
             if !ok {
