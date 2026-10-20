@@ -1587,6 +1587,24 @@ enum AppIconManager {
     private static let queue = DispatchQueue(label: "dev.zcode.pet.icon", qos: .utility)
     private static let sizes = [16, 32, 128, 256, 512]
 
+    /// 重签身份与 install.sh 同规则：优先自签证书 zcode-pet-local。macOS 15 的 TCC 对
+    /// ad-hoc 按 cdhash 记账，这里若用 `-` 重签会把 bundle 签名盖回 ad-hoc、授权作废。
+    private static let signingIdentity: String = {
+        let proc = Process()
+        proc.executableURL = URL(fileURLWithPath: "/usr/bin/security")
+        proc.arguments = ["find-identity", "-v", "-p", "codesigning"]
+        let pipe = Pipe()
+        proc.standardOutput = pipe
+        do {
+            try proc.run()
+            proc.waitUntilExit()
+            let data = pipe.fileHandleForReading.readDataToEndOfFile()
+            let out = String(data: data, encoding: .utf8) ?? ""
+            if out.contains("\"zcode-pet-local\"") { return "zcode-pet-local" }
+        } catch {}
+        return "-"
+    }()
+
     /// 异步把 bundle 图标换成指定皮肤（已是该皮肤则跳过）
     static func apply(skin: PetSkin) {
         queue.async {
@@ -1598,7 +1616,7 @@ enum AppIconManager {
             guard current != skin.id else { return }
             guard generate(skin: skin, to: res.appendingPathComponent("AppIcon.icns")) else { return }
             try? skin.id.write(to: marker, atomically: true, encoding: .utf8)
-            _ = run("/usr/bin/codesign", ["--force", "-s", "-", bundle.bundlePath])
+            _ = run("/usr/bin/codesign", ["--force", "-s", signingIdentity, bundle.bundlePath])
             NSLog("[zcode-pet] app icon swapped to skin \(skin.id)")
         }
     }

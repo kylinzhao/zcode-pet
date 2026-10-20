@@ -50,7 +50,17 @@ if ls "$ROOT"/daemon/assets/pet/*.png >/dev/null 2>&1; then
   cp "$ROOT"/daemon/assets/pet/*.png "$APP_BUNDLE/Contents/Resources/pet-art/"
 fi
 
-codesign --force -s - "$APP_BUNDLE" >/dev/null 2>&1 || echo "  (ad-hoc 签名跳过)"
+# 签名：优先本机自签证书 zcode-pet-local（scripts/gen_signing_cert.sh 生成）。macOS 15 的
+# TCC 对 ad-hoc 签名按 cdhash 记账（实测），重编译重签每次都把辅助功能授权作废；证书签名
+# 的 designated requirement 钉在证书上，重部署授权不丢。证书缺失退回 ad-hoc。
+# 注意先取全量输出再 grep：`security | grep -q` 会 SIGPIPE，set -o pipefail 下恒假。
+identities="$(security find-identity -v -p codesigning 2>/dev/null || true)"
+if echo "$identities" | grep -q "zcode-pet-local"; then
+  codesign --force -s "zcode-pet-local" "$APP_BUNDLE" >/dev/null 2>&1 \
+    || { echo "  (证书签名失败，退回 ad-hoc)"; codesign --force -s - "$APP_BUNDLE" >/dev/null 2>&1 || true; }
+else
+  codesign --force -s - "$APP_BUNDLE" >/dev/null 2>&1 || echo "  (ad-hoc 签名跳过)"
+fi
 
 chmod +x "$ROOT/plugins/zcode-pet/hooks/pet_hook.sh"
 rm -rf "$DATA_DIR/bin" 2>/dev/null || true
