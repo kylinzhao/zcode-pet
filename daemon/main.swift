@@ -1658,7 +1658,11 @@ enum AppIconManager {
             guard current != skin.id else { return }
             guard generate(skin: skin, to: res.appendingPathComponent("AppIcon.icns")) else { return }
             try? skin.id.write(to: marker, atomically: true, encoding: .utf8)
-            _ = run("/usr/bin/codesign", ["--force", "-s", "-", bundle.bundlePath])
+            // 优先固定证书（zcode-pet-local）：TCC 蓝牙授权按签名记账，adhoc 会让
+            // 每次重装都重弹授权（2026-10-21 弹窗风暴）；证书不在钥匙串时退 adhoc
+            if run("/usr/bin/codesign", ["--force", "-s", "zcode-pet-local", bundle.bundlePath]) != 0 {
+                _ = run("/usr/bin/codesign", ["--force", "-s", "-", bundle.bundlePath])
+            }
             NSLog("[zcode-pet] app icon swapped to skin \(skin.id)")
         }
     }
