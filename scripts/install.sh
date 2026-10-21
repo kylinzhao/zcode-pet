@@ -13,6 +13,13 @@ PLIST="$HOME/Library/LaunchAgents/dev.zcode.pet.plist"
 echo "[1/6] 编译守护进程到 .app bundle..."
 mkdir -p "$APP_BUNDLE/Contents/MacOS"
 swiftc -O "$ROOT/daemon/main.swift" "$ROOT/daemon/DeviceBridge.swift" -lz -o "$EXE"
+# 固定证书签名：TCC（蓝牙授权）按签名记账——adhoc 每次编译 CDHash 变会反复弹授权
+# 弹窗；固定 zcode-pet-local 证书后重装/更新不再打扰（2026-10-21 弹窗风暴教训）。
+if security find-identity -v -p codesigning 2>/dev/null | grep -q "zcode-pet-local"; then
+    codesign --force -s "zcode-pet-local" "$APP_BUNDLE" >/dev/null 2>&1         && echo "  已用 zcode-pet-local 证书签名（蓝牙授权不再重复弹窗）"         || echo "  ⚠️ 签名失败（不影响功能，授权弹窗会再出现）"
+else
+    codesign --force -s - "$APP_BUNDLE" >/dev/null 2>&1   # 无证书退回 adhoc
+fi
 
 cat > "$APP_BUNDLE/Contents/Info.plist" <<'EOF'
 <?xml version="1.0" encoding="UTF-8"?>
